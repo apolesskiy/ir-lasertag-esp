@@ -211,12 +211,19 @@ class IrReceiver {
   gpio_num_t gpio_ = GPIO_NUM_NC;
   ProtocolConfig protocol_;
   rmt_channel_handle_t channel_ = nullptr;
-  QueueHandle_t message_queue_ = nullptr;
-  QueueHandle_t raw_queue_ = nullptr;
+
+  /// ISR→task queue: carries num_symbols (size_t). Task reads symbols
+  /// from symbol_buffer_ which is stable until restart_receive().
+  QueueHandle_t symbol_queue_ = nullptr;
 
   // Symbol buffer (allocated during init)
   rmt_symbol_word_t* symbol_buffer_ = nullptr;
   size_t symbol_buffer_size_ = 0;
+
+  /// RMT signal_range_max_ns, computed from protocol config.
+  /// Gaps longer than this end a frame. Set so that intra-packet
+  /// spaces pass through but inter-packet gaps trigger frame-end.
+  uint32_t signal_range_max_ns_ = 12000000;  // default 12ms
 
   bool initialized_ = false;
   bool protocol_set_ = false;

@@ -5,6 +5,7 @@
 
 #include "ir_lasertag/codec/ir_receiver.hpp"
 
+#include <algorithm>
 #include <cstring>
 
 #include "esp_check.h"
@@ -15,18 +16,6 @@ static const char* TAG = "ir_rx";
 
 namespace ir_lasertag {
 namespace codec {
-
-namespace {
-
-/**
- * @brief Queue item for raw symbols received from ISR.
- */
-struct RawQueueItem {
-  size_t num_symbols;
-  // Symbols are stored in the shared buffer
-};
-
-}  // namespace
 
 IrReceiver::IrReceiver() = default;
 
@@ -52,21 +41,13 @@ esp_err_t IrReceiver::init(const rmt_rx_channel_config_t& config,
     return ESP_ERR_NO_MEM;
   }
 
-  // Create message queue
-  message_queue_ = xQueueCreate(4, sizeof(IrMessage));
-  if (message_queue_ == nullptr) {
-    ESP_LOGE(TAG, "failed to create message queue");
-    free(symbol_buffer_);
-    symbol_buffer_ = nullptr;
-    return ESP_ERR_NO_MEM;
-  }
-
-  // Create raw queue
-  raw_queue_ = xQueueCreate(2, sizeof(RawQueueItem));
-  if (raw_queue_ == nullptr) {
-    ESP_LOGE(TAG, "failed to create raw queue");
-    vQueueDelete(message_queue_);
-    message_queue_ = nullptr;
+  // Create symbol event queue (ISR -> task)
+  // Depth 2 provides a small buffer; only one rmt_receive() is in
+  // flight at a time, but a second event may be queued if the task
+  // restarts receive before processing the previous event.
+  symbol_queue_ = xQueueCreate(2, sizeof(size_t));
+  if (symbol_queue_ == nullptr) {
+    ESP_LOGE(TAG, "failed to create symbol queue");
     free(symbol_buffer_);
     symbol_buffer_ = nullptr;
     return ESP_ERR_NO_MEM;
@@ -76,10 +57,8 @@ esp_err_t IrReceiver::init(const rmt_rx_channel_config_t& config,
   esp_err_t ret = rmt_new_rx_channel(&config, &channel_);
   if (ret != ESP_OK) {
     ESP_LOGE(TAG, "failed to create RX channel: %s", esp_err_to_name(ret));
-    vQueueDelete(raw_queue_);
-    raw_queue_ = nullptr;
-    vQueueDelete(message_queue_);
-    message_queue_ = nullptr;
+    vQueueDelete(symbol_queue_);
+    symbol_queue_ = nullptr;
     free(symbol_buffer_);
     symbol_buffer_ = nullptr;
     return ret;
@@ -95,10 +74,8 @@ esp_err_t IrReceiver::init(const rmt_rx_channel_config_t& config,
     ESP_LOGE(TAG, "failed to register callbacks: %s", esp_err_to_name(ret));
     rmt_del_channel(channel_);
     channel_ = nullptr;
-    vQueueDelete(raw_queue_);
-    raw_queue_ = nullptr;
-    vQueueDelete(message_queue_);
-    message_queue_ = nullptr;
+    vQueueDelete(symbol_queue_);
+    symbol_queue_ = nullptr;
     free(symbol_buffer_);
     symbol_buffer_ = nullptr;
     return ret;
@@ -125,14 +102,9 @@ void IrReceiver::deinit() {
     channel_ = nullptr;
   }
 
-  if (raw_queue_) {
-    vQueueDelete(raw_queue_);
-    raw_queue_ = nullptr;
-  }
-
-  if (message_queue_) {
-    vQueueDelete(message_queue_);
-    message_queue_ = nullptr;
+  if (symbol_queue_) {
+    vQueueDelete(symbol_queue_);
+    symbol_queue_ = nullptr;
   }
 
   if (symbol_buffer_) {
@@ -159,7 +131,39 @@ esp_err_t IrReceiver::set_protocol(const ProtocolConfig& config) {
   protocol_ = config;
   protocol_set_ = true;
 
-  ESP_LOGI(TAG, "protocol set: tolerance=%d%%", protocol_.tolerance_percent);
+  // Compute signal_range_max_ns from protocol timings.
+  // This value tells the RMT how long a gap (no transitions) is allowed
+  // before a frame is considered finished.  It must be:
+  //   > max intra-packet space (so normal bit spaces don't split a frame)
+  //   < inter-packet gap       (so repeated transmissions are segmented)
+  uint16_t max_space = protocol_.header_space_us;
+  if (protocol_.zero_half2.is_space()) {
+    max_space = std::max(max_space, protocol_.zero_half2.duration_us);
+  }
+  if (protocol_.one_half2.is_space()) {
+    max_space = std::max(max_space, protocol_.one_half2.duration_us);
+  }
+
+  if (protocol_.footer_space_us > 0 &&
+      protocol_.footer_space_us > max_space) {
+    // Gap is known — set range to 2× the max intra-packet space
+    signal_range_max_ns_ = static_cast<uint32_t>(max_space) * 2 * 1000;
+    // Ensure it stays below the gap
+    uint32_t gap_ns = static_cast<uint32_t>(protocol_.footer_space_us) * 1000;
+    if (signal_range_max_ns_ >= gap_ns) {
+      signal_range_max_ns_ = gap_ns * 9 / 10;
+    }
+  } else {
+    // No gap info — generous default
+    signal_range_max_ns_ = 12000000;
+  }
+  if (signal_range_max_ns_ < 10000) {
+    signal_range_max_ns_ = 12000000;
+  }
+
+  ESP_LOGI(TAG, "protocol set: tolerance=%d%%, signal_range_max=%lu ns",
+           protocol_.tolerance_percent,
+           (unsigned long)signal_range_max_ns_);
 
   return ESP_OK;
 }
@@ -190,7 +194,11 @@ esp_err_t IrReceiver::start() {
     return ret;
   }
 
-  // Start receiving
+  // Drain any stale events left from a previous session
+  size_t dummy;
+  while (xQueueReceive(symbol_queue_, &dummy, 0)) {}
+
+  // Start first capture
   restart_receive();
 
   receiving_ = true;
@@ -231,11 +239,44 @@ esp_err_t IrReceiver::receive(IrMessage* message, uint32_t timeout_ms) {
     return ESP_ERR_INVALID_ARG;
   }
 
-  if (xQueueReceive(message_queue_, message, pdMS_TO_TICKS(timeout_ms))) {
-    return ESP_OK;
-  }
+  // Wait for symbols from ISR, decode in task context.
+  // Loop to skip noise / invalid frames until a valid decode or timeout.
+  TickType_t start_ticks = xTaskGetTickCount();
+  TickType_t timeout_ticks = pdMS_TO_TICKS(timeout_ms);
 
-  return ESP_ERR_TIMEOUT;
+  while (true) {
+    TickType_t elapsed = xTaskGetTickCount() - start_ticks;
+    if (elapsed >= timeout_ticks && timeout_ticks != portMAX_DELAY) {
+      return ESP_ERR_TIMEOUT;
+    }
+    TickType_t remaining = (timeout_ticks == portMAX_DELAY)
+                               ? portMAX_DELAY
+                               : timeout_ticks - elapsed;
+
+    size_t num_symbols;
+    if (!xQueueReceive(symbol_queue_, &num_symbols, remaining)) {
+      return ESP_ERR_TIMEOUT;
+    }
+
+    // Copy symbols to a local buffer and restart RMT immediately.
+    // This minimises the gap before the next packet can be captured,
+    // which is critical for paired-packet protocols like IRT (2ms gap).
+    static constexpr size_t kMaxLocalSymbols = 64;
+    rmt_symbol_word_t local_buf[kMaxLocalSymbols];
+    size_t copy_count = (num_symbols < kMaxLocalSymbols)
+                            ? num_symbols : kMaxLocalSymbols;
+    memcpy(local_buf, symbol_buffer_,
+           copy_count * sizeof(rmt_symbol_word_t));
+
+    // Restart RMT for next capture (symbol_buffer_ may be overwritten)
+    restart_receive();
+
+    // Decode from local copy in task context (safe to use regular ESP_LOGD)
+    if (decode_symbols(local_buf, copy_count, message)) {
+      return ESP_OK;
+    }
+    // Invalid frame (noise) — loop and wait for the next one
+  }
 }
 
 esp_err_t IrReceiver::receive_raw(RawTiming* timings, size_t max_count,
@@ -253,19 +294,16 @@ esp_err_t IrReceiver::receive_raw(RawTiming* timings, size_t max_count,
     return ESP_ERR_INVALID_ARG;
   }
 
-  RawQueueItem item;
-  if (xQueueReceive(raw_queue_, &item, pdMS_TO_TICKS(timeout_ms))) {
-    size_t copy_count = (item.num_symbols < max_count)
-                            ? item.num_symbols
+  size_t num_symbols;
+  if (xQueueReceive(symbol_queue_, &num_symbols, pdMS_TO_TICKS(timeout_ms))) {
+    size_t copy_count = (num_symbols < max_count)
+                            ? num_symbols
                             : max_count;
 
     // Convert RMT symbols to RawTiming
     for (size_t i = 0; i < copy_count; i++) {
-      // Each RMT symbol has two parts (duration0/level0, duration1/level1)
-      // We output them as separate RawTiming entries
-      // But for simplicity, treat each symbol as one timing (mark or space)
       const auto& sym = symbol_buffer_[i];
-      
+
       // First part of symbol
       if (i * 2 < max_count) {
         timings[i * 2].duration_us = sym.duration0;
@@ -279,6 +317,9 @@ esp_err_t IrReceiver::receive_raw(RawTiming* timings, size_t max_count,
     }
 
     *received_count = copy_count * 2;  // Each symbol has 2 parts
+
+    // Restart RMT for next capture
+    restart_receive();
     return ESP_OK;
   }
 
@@ -290,49 +331,24 @@ bool IRAM_ATTR IrReceiver::rmt_rx_done_callback(
     const rmt_rx_done_event_data_t* edata,
     void* user_ctx) {
   auto* receiver = static_cast<IrReceiver*>(user_ctx);
-  bool high_prio_woken = receiver->on_receive_done(edata);
-
-  // Re-start receiving (from ISR context)
-  rmt_receive_config_t rx_config = {
-      .signal_range_min_ns = 1000,      // 1us minimum
-      .signal_range_max_ns = 12000000,  // 12ms maximum (long gaps)
-      .flags = {
-          .en_partial_rx = 0,
-      },
-  };
-
-  rmt_receive(channel, receiver->symbol_buffer_,
-              receiver->symbol_buffer_size_ * sizeof(rmt_symbol_word_t),
-              &rx_config);
-
-  return high_prio_woken;
+  return receiver->on_receive_done(edata);
+  // NOTE: No restart here — the task calls restart_receive() after
+  // processing the symbols.  This guarantees symbol_buffer_ is stable
+  // when the task reads it.
 }
 
 bool IRAM_ATTR IrReceiver::on_receive_done(
     const rmt_rx_done_event_data_t* edata) {
   BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-
-  if (raw_mode_) {
-    // Queue raw symbols
-    RawQueueItem item = {
-        .num_symbols = edata->num_symbols,
-    };
-    xQueueSendFromISR(raw_queue_, &item, &xHigherPriorityTaskWoken);
-  } else if (protocol_set_) {
-    // Decode message and queue it
-    IrMessage message;
-    if (decode_symbols(edata->received_symbols, edata->num_symbols, &message)) {
-      xQueueSendFromISR(message_queue_, &message, &xHigherPriorityTaskWoken);
-    }
-  }
-
+  size_t num_symbols = edata->num_symbols;
+  xQueueSendFromISR(symbol_queue_, &num_symbols, &xHigherPriorityTaskWoken);
   return xHigherPriorityTaskWoken == pdTRUE;
 }
 
 void IrReceiver::restart_receive() {
   rmt_receive_config_t rx_config = {
-      .signal_range_min_ns = 1000,      // 1us minimum
-      .signal_range_max_ns = 12000000,  // 12ms maximum
+      .signal_range_min_ns = 1000,                    // 1µs minimum, <3187 required by RMT
+      .signal_range_max_ns = signal_range_max_ns_,    // from protocol
       .flags = {
           .en_partial_rx = 0,
       },
@@ -372,9 +388,16 @@ bool IrReceiver::timing_matches(uint16_t actual, uint16_t expected,
 
 bool IrReceiver::decode_symbols(const rmt_symbol_word_t* symbols, size_t count,
                                 IrMessage* message) {
+  // This function runs in task context (called from receive()).
+
   if (count < 2 || symbols == nullptr || message == nullptr) {
+    ESP_LOGD(TAG, "decode: rejected (count=%u)", (unsigned)count);
     return false;
   }
+
+  ESP_LOGD(TAG, "decode: %u syms, expect %u bits, tol=%u%%",
+           (unsigned)count, (unsigned)protocol_.bit_count,
+           (unsigned)protocol_.tolerance_percent);
 
   memset(message, 0, sizeof(IrMessage));
 
@@ -389,11 +412,19 @@ bool IrReceiver::decode_symbols(const rmt_symbol_word_t* symbols, size_t count,
   if (protocol_.header_mark_us > 0) {
     const auto& sym = symbols[sym_idx];
 
+    ESP_LOGD(TAG, "decode: hdr d0=%u l0=%u d1=%u l1=%u (want m=%u s=%u)",
+             (unsigned)sym.duration0, (unsigned)sym.level0,
+             (unsigned)sym.duration1, (unsigned)sym.level1,
+             (unsigned)protocol_.header_mark_us,
+             (unsigned)protocol_.header_space_us);
+
     // Header should be mark followed by space
     if (!timing_matches(sym.duration0, protocol_.header_mark_us, true)) {
+      ESP_LOGD(TAG, "decode: header mark mismatch");
       return false;  // Header mark doesn't match
     }
     if (!timing_matches(sym.duration1, protocol_.header_space_us, false)) {
+      ESP_LOGD(TAG, "decode: header space mismatch");
       return false;  // Header space doesn't match
     }
 
@@ -414,8 +445,14 @@ bool IrReceiver::decode_symbols(const rmt_symbol_word_t* symbols, size_t count,
     // Get current symbol
     const auto& sym = symbols[sym_idx];
 
+    ESP_LOGD(TAG, "decode: b[%u] d0=%u l0=%u d1=%u l1=%u",
+             (unsigned)message->bit_count,
+             (unsigned)sym.duration0, (unsigned)sym.level0,
+             (unsigned)sym.duration1, (unsigned)sym.level1);
+
     // End of message detection
     if (sym.duration0 == 0 && sym.duration1 == 0) {
+      ESP_LOGD(TAG, "decode: end-of-message (zero sym)");
       break;
     }
 
@@ -423,6 +460,7 @@ bool IrReceiver::decode_symbols(const rmt_symbol_word_t* symbols, size_t count,
     if (protocol_.footer_mark_us > 0 &&
         timing_matches(sym.duration0, protocol_.footer_mark_us, true) &&
         sym.duration1 == 0) {
+      ESP_LOGD(TAG, "decode: footer detected");
       break;  // Footer found, end of message
     }
 
@@ -443,6 +481,10 @@ bool IrReceiver::decode_symbols(const rmt_symbol_word_t* symbols, size_t count,
         sym.duration1, protocol_.zero_half2.duration_us,
         sym.level1 == 1);
 
+    ESP_LOGD(TAG, "decode: 1h1=%d 1h2=%d 0h1=%d 0h2=%d",
+             one_half1_matches, one_half2_matches,
+             zero_half1_matches, zero_half2_matches);
+
     // Determine decoded bit value (-1 = not decoded)
     int decoded_bit = -1;
 
@@ -459,13 +501,17 @@ bool IrReceiver::decode_symbols(const rmt_symbol_word_t* symbols, size_t count,
       // durations are distinct between zero and one.
       if (one_half1_matches && !zero_half1_matches) {
         decoded_bit = 1;
+        ESP_LOGD(TAG, "decode: last-bit fallback -> 1");
       } else if (zero_half1_matches && !one_half1_matches) {
         decoded_bit = 0;
+        ESP_LOGD(TAG, "decode: last-bit fallback -> 0");
       }
     }
 
     if (decoded_bit < 0) {
       // Cannot decode this symbol - end of message or error
+      ESP_LOGD(TAG, "decode: bad sym at bit %u",
+               (unsigned)message->bit_count);
       break;
     }
 
@@ -497,6 +543,11 @@ bool IrReceiver::decode_symbols(const rmt_symbol_word_t* symbols, size_t count,
   } else {
     message->valid = (message->bit_count > 0);
   }
+
+  ESP_LOGD(TAG, "decode: valid=%d bits=%u data=[%02X %02X]",
+           message->valid, (unsigned)message->bit_count,
+           message->data[0], message->data[1]);
+
   return message->valid;
 }
 

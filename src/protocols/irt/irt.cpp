@@ -97,7 +97,7 @@ esp_err_t IrtGun::start_receive() {
 
   // Reset paired packet state
   last_gun_id_ = 0;
-  last_receive_time_ = 0;
+  last_receive_time_us_ = 0;
 
   esp_err_t err = receiver_->start();
   if (err != ESP_OK) {
@@ -187,35 +187,43 @@ esp_err_t IrtGun::receive(uint16_t* gun_id, uint32_t timeout_ms) {
 
 std::optional<uint16_t> IrtGun::decode_message(const codec::IrMessage& message) {
   if (!message.valid || message.bit_count != 16) {
+    ESP_LOGD(TAG, "decode_message: rejected (valid=%d, bits=%u)",
+             message.valid, (unsigned)message.bit_count);
     return std::nullopt;
   }
 
   // Decode 16-bit gun ID from MSB-first data
   uint16_t gun_id = (static_cast<uint16_t>(message.data[0]) << 8) |
                     static_cast<uint16_t>(message.data[1]);
+  ESP_LOGD(TAG, "decode_message: gun_id=0x%04X (CCM=%d)", gun_id,
+           get_ccm_id(gun_id));
   return gun_id;
 }
 
 bool IrtGun::validate_pair(uint16_t gun_id) {
-  // Get current time in milliseconds
-  uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+  // Get current time in microseconds for precise gap measurement
+  int64_t now_us = esp_timer_get_time();
 
   // Check for paired packet validation
-  // IRT guns send the same ID twice with ~2ms gap
-  // We validate by checking if we received the same ID within kPairTimeoutMs
+  // IRT guns send the same ID twice with ~2ms gap.
+  // After RMT frame segmentation + decode, the measured delta is
+  // typically ~18ms (packet duration + signal_range_max wait).
   if (last_gun_id_ == gun_id &&
-      (now_ms - last_receive_time_) <= kPairTimeoutMs) {
+      (now_us - last_receive_time_us_) <= kPairTimeoutUs) {
     // Valid paired packet
-    ESP_LOGD(TAG, "Valid paired gun ID: 0x%04X", gun_id);
+    ESP_LOGD(TAG, "Valid paired gun ID: 0x%04X (dt=%lld us)", gun_id,
+             (long long)(now_us - last_receive_time_us_));
 
     // Reset state to avoid triple-triggering
     last_gun_id_ = 0;
-    last_receive_time_ = 0;
+    last_receive_time_us_ = 0;
     return true;
   } else {
     // First packet of potential pair - store and wait
+    ESP_LOGD(TAG, "Pair candidate: 0x%04X (prev=0x%04X, dt=%lld us)", gun_id,
+             last_gun_id_, (long long)(now_us - last_receive_time_us_));
     last_gun_id_ = gun_id;
-    last_receive_time_ = now_ms;
+    last_receive_time_us_ = now_us;
     return false;
   }
 }

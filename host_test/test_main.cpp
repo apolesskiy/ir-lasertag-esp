@@ -9,6 +9,8 @@ extern void run_protocol_config_tests();
 extern int get_protocol_config_test_failures();
 extern void run_arclite_tagcode_tests();
 extern int get_arclite_tagcode_test_failures();
+extern void run_irt_gun_tests();
+extern int get_irt_gun_test_failures();
 
 int main() {
   printf("========================================\n");
@@ -17,11 +19,13 @@ int main() {
 
   run_protocol_config_tests();
   run_arclite_tagcode_tests();
+  run_irt_gun_tests();
 
   printf("\n========================================\n");
 
   int total_failures = get_protocol_config_test_failures() +
-                       get_arclite_tagcode_test_failures();
+                       get_arclite_tagcode_test_failures() +
+                       get_irt_gun_test_failures();
 
   if (total_failures == 0) {
     printf("All tests PASSED!\n");

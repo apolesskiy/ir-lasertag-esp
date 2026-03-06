@@ -15,6 +15,7 @@ include_directories(
 add_executable(test_ir_protocol
   test_protocol_config.cpp
   test_arclite_tagcode.cpp
+  test_irt_gun.cpp
   test_main.cpp
   # Source file under test (pure config logic, no hardware deps)
   ${CMAKE_CURRENT_SOURCE_DIR}/../src/codec/ir_protocol_config.cpp

@@ -135,8 +135,10 @@ class IrtGun {
   /// Unassigned gun ID (no CCM assignment).
   static constexpr uint16_t kUnassignedId = 0xF0F0;
 
-  /// Maximum time to wait for second packet during receive validation (ms).
-  static constexpr uint32_t kPairTimeoutMs = 10;
+  /// Maximum time between paired packets during receive validation (µs).
+  /// The actual gap depends on packet duration (~16ms) plus the RMT
+  /// signal_range_max wait (~1ms) plus task scheduling.
+  static constexpr int64_t kPairTimeoutUs = 50000;
 
   IrtGun();
   ~IrtGun();
@@ -282,9 +284,9 @@ class IrtGun {
 
   codec::IrTransmitter* transmitter_ = nullptr;
   codec::IrReceiver* receiver_ = nullptr;
-  uint8_t send_data_[2] = {};     ///< Persistent buffer for transmit
-  uint16_t last_gun_id_ = 0;      ///< Last received gun ID for pair validation
-  uint32_t last_receive_time_ = 0;  ///< Timestamp of last receive (ms)
+  uint8_t send_data_[2] = {};       ///< Persistent buffer for transmit
+  uint16_t last_gun_id_ = 0;        ///< Last received gun ID for pair validation
+  int64_t last_receive_time_us_ = 0; ///< Timestamp of last receive (µs)
   bool initialized_ = false;
   bool receiving_ = false;
 };
