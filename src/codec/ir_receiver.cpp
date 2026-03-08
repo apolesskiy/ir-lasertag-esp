@@ -281,6 +281,17 @@ esp_err_t IrReceiver::receive(IrMessage* message, uint32_t timeout_ms) {
 
 esp_err_t IrReceiver::receive_raw(RawTiming* timings, size_t max_count,
                                   size_t* received_count, uint32_t timeout_ms) {
+  RawReceiveConfig default_config;
+  default_config.signal_range_min_ns = 1000;
+  default_config.signal_range_max_ns = signal_range_max_ns_;
+  return receive_raw(timings, max_count, received_count, default_config,
+                     timeout_ms);
+}
+
+esp_err_t IrReceiver::receive_raw(RawTiming* timings, size_t max_count,
+                                  size_t* received_count,
+                                  const RawReceiveConfig& config,
+                                  uint32_t timeout_ms) {
   if (!initialized_) {
     return ESP_ERR_INVALID_STATE;
   }
@@ -318,8 +329,8 @@ esp_err_t IrReceiver::receive_raw(RawTiming* timings, size_t max_count,
 
     *received_count = copy_count * 2;  // Each symbol has 2 parts
 
-    // Restart RMT for next capture
-    restart_receive();
+    // Restart RMT with caller-provided thresholds
+    restart_receive(config);
     return ESP_OK;
   }
 
@@ -346,9 +357,16 @@ bool IRAM_ATTR IrReceiver::on_receive_done(
 }
 
 void IrReceiver::restart_receive() {
+  RawReceiveConfig default_config;
+  default_config.signal_range_min_ns = 1000;
+  default_config.signal_range_max_ns = signal_range_max_ns_;
+  restart_receive(default_config);
+}
+
+void IrReceiver::restart_receive(const RawReceiveConfig& config) {
   rmt_receive_config_t rx_config = {
-      .signal_range_min_ns = 1000,                    // 1µs minimum, <3187 required by RMT
-      .signal_range_max_ns = signal_range_max_ns_,    // from protocol
+      .signal_range_min_ns = config.signal_range_min_ns,
+      .signal_range_max_ns = config.signal_range_max_ns,
       .flags = {
           .en_partial_rx = 0,
       },
