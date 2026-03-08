@@ -165,5 +165,16 @@ struct RawTiming {
   Level level;           ///< Signal level (mark or space)
 };
 
+/**
+ * @brief Configuration for raw IR reception thresholds.
+ *
+ * Passed to receive_raw() to override RMT signal range parameters
+ * for a single receive cycle. Does not modify IrReceiver state.
+ */
+struct RawReceiveConfig {
+  uint32_t signal_range_min_ns = 1000;      ///< Min pulse duration (default 1us)
+  uint32_t signal_range_max_ns = 12000000;  ///< Max gap duration (default 12ms)
+};
+
 }  // namespace codec
 }  // namespace ir_lasertag

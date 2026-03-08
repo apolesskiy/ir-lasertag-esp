@@ -161,6 +161,26 @@ class IrReceiver {
   esp_err_t receive_raw(RawTiming* timings, size_t max_count,
                         size_t* received_count, uint32_t timeout_ms);
 
+  /**
+   * @brief Receive raw IR timings with custom RMT thresholds.
+   *
+   * Same as receive_raw(), but uses the provided config to override
+   * signal_range_min_ns and signal_range_max_ns for this receive cycle.
+   * Does not modify IrReceiver's stored state.
+   *
+   * @param timings Output buffer for timings.
+   * @param max_count Maximum number of timings to receive.
+   * @param received_count Output: actual number of timings received.
+   * @param config RMT threshold configuration for this receive.
+   * @param timeout_ms Maximum time to wait (0 = no wait).
+   * @return ESP_OK if data received, ESP_ERR_TIMEOUT on timeout,
+   *         ESP_ERR_INVALID_STATE if not in raw mode.
+   */
+  esp_err_t receive_raw(RawTiming* timings, size_t max_count,
+                        size_t* received_count,
+                        const RawReceiveConfig& config,
+                        uint32_t timeout_ms);
+
  private:
   /**
    * @brief RMT receive callback (static).
@@ -207,6 +227,11 @@ class IrReceiver {
    * @brief Restart RMT receive after processing data.
    */
   void restart_receive();
+
+  /**
+   * @brief Restart RMT receive with custom thresholds.
+   */
+  void restart_receive(const RawReceiveConfig& config);
 
   gpio_num_t gpio_ = GPIO_NUM_NC;
   ProtocolConfig protocol_;
