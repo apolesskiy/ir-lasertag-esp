@@ -14,6 +14,7 @@
 
 #include "ir_lasertag/codec/ir_transmitter.hpp"
 #include "ir_lasertag/codec/ir_receiver.hpp"
+#include "ir_lasertag/codec/rmt_rx_source.hpp"
 #include "ir_lasertag/protocols/arclite/arclite.hpp"
 
 static const char* TAG = "ir_example";
@@ -43,8 +44,8 @@ extern "C" void app_main(void) {
     return;
   }
 
-  // --- Initialize receiver ---
-  ir_lasertag::codec::IrReceiver rx;
+  // --- Initialize RMT RX source ---
+  ir_lasertag::codec::RmtRxSource rx_source;
   rmt_rx_channel_config_t rx_config = {
       .gpio_num = IR_RX_GPIO,
       .clk_src = RMT_CLK_SRC_DEFAULT,
@@ -52,7 +53,15 @@ extern "C" void app_main(void) {
       .mem_block_symbols = 128,
   };
 
-  err = rx.init(rx_config);
+  err = rx_source.init(rx_config);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "RX source init failed: %s", esp_err_to_name(err));
+    return;
+  }
+
+  // --- Initialize receiver with the RMT source ---
+  ir_lasertag::codec::IrReceiver rx;
+  err = rx.init(&rx_source);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "RX init failed: %s", esp_err_to_name(err));
     return;

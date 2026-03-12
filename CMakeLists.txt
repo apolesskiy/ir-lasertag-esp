@@ -7,6 +7,7 @@ idf_component_register(
     "src/codec/ir_encoder.cpp"
     "src/codec/ir_transmitter.cpp"
     "src/codec/ir_receiver.cpp"
+    "src/codec/rmt_rx_source.cpp"
     # Protocol layer (protocol-specific message APIs)
     "src/protocols/arclite/arclite.cpp"
     "src/protocols/irt/irt.cpp"

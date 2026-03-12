@@ -1,0 +1,8 @@
+CONFIG_IDF_TARGET="esp32s3"
+
+# Disable task watchdog — workers spin tight loops that would trip it
+CONFIG_ESP_TASK_WDT_EN=n
+
+# 1kHz tick rate — needed for sub-10ms vTaskDelay in the TX gap.
+# Default 100Hz (10ms ticks) makes pdMS_TO_TICKS(3) round to 0.
+CONFIG_FREERTOS_HZ=1000
