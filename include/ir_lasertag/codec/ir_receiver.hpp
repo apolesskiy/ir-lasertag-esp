@@ -1,6 +1,6 @@
 /**
  * @file ir_receiver.hpp
- * @brief IR receiver using ESP32 RMT peripheral.
+ * @brief IR receiver — decodes symbols from any IrRxSource backend.
  */
 
 #pragma once
@@ -15,22 +15,23 @@
 #include "freertos/queue.h"
 
 #include "ir_lasertag/codec/ir_protocol.hpp"
+#include "ir_lasertag/codec/ir_rx_source.hpp"
 
 namespace ir_lasertag {
 namespace codec {
 
 /**
- * @brief IR receiver using RMT peripheral.
+ * @brief IR receiver — decodes symbol frames into IR messages.
  *
- * Receives and decodes IR signals according to the configured protocol.
- * Supports both decoded message mode and raw timing mode for protocol
- * analysis.
+ * Receives symbol frames from an IrRxSource backend and decodes
+ * them according to the configured protocol. Supports both decoded
+ * message mode and raw timing mode for protocol analysis.
+ *
+ * The receiver does not own the source — the caller creates and
+ * initializes the source, then passes it to init().
  */
 class IrReceiver {
  public:
-  /// Default symbol buffer size
-  static constexpr size_t kDefaultSymbolBufferSize = 128;
-
   IrReceiver();
   ~IrReceiver();
 
@@ -39,17 +40,18 @@ class IrReceiver {
   IrReceiver& operator=(const IrReceiver&) = delete;
 
   /**
-   * @brief Initialize the receiver.
+   * @brief Initialize the receiver with a symbol source.
    *
-   * @param config RMT RX channel configuration (esp-idf type).
-   * @param symbol_buffer_size Size of RMT symbol buffer (default 128).
+   * The caller retains ownership of the source. It must remain
+   * valid until deinit() is called.
+   *
+   * @param source Backend that delivers symbol frames.
    * @return ESP_OK on success, error code otherwise.
    */
-  esp_err_t init(const rmt_rx_channel_config_t& config,
-                 size_t symbol_buffer_size = kDefaultSymbolBufferSize);
+  esp_err_t init(IrRxSource* source);
 
   /**
-   * @brief Deinitialize and release RMT resources.
+   * @brief Deinitialize and release resources.
    */
   void deinit();
 
@@ -62,6 +64,9 @@ class IrReceiver {
 
   /**
    * @brief Set the protocol configuration.
+   *
+   * Computes max_symbol_duration from protocol timings and pushes
+   * it to the source backend.
    *
    * @param config Protocol configuration.
    * @return ESP_OK on success, error code otherwise.
@@ -102,7 +107,7 @@ class IrReceiver {
   /**
    * @brief Start receiving IR signals.
    *
-   * Enables the RMT receiver. Received messages are queued.
+   * Delegates to the source backend to begin symbol delivery.
    *
    * @return ESP_OK on success.
    */
@@ -162,38 +167,26 @@ class IrReceiver {
                         size_t* received_count, uint32_t timeout_ms);
 
   /**
-   * @brief Receive raw IR timings with custom RMT thresholds.
+   * @brief Compute max_symbol_duration_us from protocol timings.
    *
-   * Same as receive_raw(), but uses the provided config to override
-   * signal_range_min_ns and signal_range_max_ns for this receive cycle.
-   * Does not modify IrReceiver's stored state.
+   * Returns 3x the longest individual pulse (mark or space) in the
+   * protocol definition. Covers header, data half-bits, and footer.
    *
-   * @param timings Output buffer for timings.
-   * @param max_count Maximum number of timings to receive.
-   * @param received_count Output: actual number of timings received.
-   * @param config RMT threshold configuration for this receive.
-   * @param timeout_ms Maximum time to wait (0 = no wait).
-   * @return ESP_OK if data received, ESP_ERR_TIMEOUT on timeout,
-   *         ESP_ERR_INVALID_STATE if not in raw mode.
+   * @param config Protocol configuration.
+   * @return Computed max symbol duration in microseconds.
    */
-  esp_err_t receive_raw(RawTiming* timings, size_t max_count,
-                        size_t* received_count,
-                        const RawReceiveConfig& config,
-                        uint32_t timeout_ms);
+  static uint16_t compute_max_symbol_duration_us(const ProtocolConfig& config);
 
  private:
   /**
-   * @brief RMT receive callback (static).
+   * @brief Callback invoked by IrRxSource when a frame arrives.
+   *
+   * Copies symbols into the internal buffer and queues the count
+   * for task-context processing. May be called from ISR context
+   * depending on the backend.
    */
-  static bool rmt_rx_done_callback(rmt_channel_handle_t channel,
-                                   const rmt_rx_done_event_data_t* edata,
-                                   void* user_ctx);
-
-  /**
-   * @brief Handle received RMT data.
-   * @return true if high-priority task was woken.
-   */
-  bool on_receive_done(const rmt_rx_done_event_data_t* edata);
+  static void on_source_frame(const rmt_symbol_word_t* symbols,
+                              size_t count, void* ctx);
 
   /**
    * @brief Decode received symbols into message.
@@ -223,32 +216,15 @@ class IrReceiver {
    */
   bool timing_matches(uint16_t actual, uint16_t expected, bool is_mark) const;
 
-  /**
-   * @brief Restart RMT receive after processing data.
-   */
-  void restart_receive();
-
-  /**
-   * @brief Restart RMT receive with custom thresholds.
-   */
-  void restart_receive(const RawReceiveConfig& config);
-
-  gpio_num_t gpio_ = GPIO_NUM_NC;
+  IrRxSource* source_ = nullptr;
   ProtocolConfig protocol_;
-  rmt_channel_handle_t channel_ = nullptr;
 
-  /// ISR→task queue: carries num_symbols (size_t). Task reads symbols
-  /// from symbol_buffer_ which is stable until restart_receive().
+  /// Source→task queue: carries num_symbols (size_t).
   QueueHandle_t symbol_queue_ = nullptr;
 
-  // Symbol buffer (allocated during init)
-  rmt_symbol_word_t* symbol_buffer_ = nullptr;
-  size_t symbol_buffer_size_ = 0;
-
-  /// RMT signal_range_max_ns, computed from protocol config.
-  /// Gaps longer than this end a frame. Set so that intra-packet
-  /// spaces pass through but inter-packet gaps trigger frame-end.
-  uint32_t signal_range_max_ns_ = 12000000;  // default 12ms
+  // Symbol buffer — frames are copied here by on_source_frame()
+  static constexpr size_t kSymbolBufferSize = 64;
+  rmt_symbol_word_t symbol_buffer_[kSymbolBufferSize] = {};
 
   bool initialized_ = false;
   bool protocol_set_ = false;

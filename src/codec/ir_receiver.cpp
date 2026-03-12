@@ -10,7 +10,6 @@
 
 #include "esp_check.h"
 #include "esp_log.h"
-#include "driver/rmt_rx.h"
 
 static const char* TAG = "ir_rx";
 
@@ -23,67 +22,40 @@ IrReceiver::~IrReceiver() {
   deinit();
 }
 
-esp_err_t IrReceiver::init(const rmt_rx_channel_config_t& config,
-                           size_t symbol_buffer_size) {
+esp_err_t IrReceiver::init(IrRxSource* source) {
   if (initialized_) {
     ESP_LOGE(TAG, "already initialized");
     return ESP_ERR_INVALID_STATE;
   }
 
-  gpio_ = config.gpio_num;
-  symbol_buffer_size_ = symbol_buffer_size;
-
-  // Allocate symbol buffer
-  symbol_buffer_ = static_cast<rmt_symbol_word_t*>(
-      malloc(symbol_buffer_size_ * sizeof(rmt_symbol_word_t)));
-  if (symbol_buffer_ == nullptr) {
-    ESP_LOGE(TAG, "failed to allocate symbol buffer");
-    return ESP_ERR_NO_MEM;
+  if (source == nullptr) {
+    ESP_LOGE(TAG, "source is null");
+    return ESP_ERR_INVALID_ARG;
   }
 
-  // Create symbol event queue (ISR -> task)
-  // Depth 2 provides a small buffer; only one rmt_receive() is in
-  // flight at a time, but a second event may be queued if the task
-  // restarts receive before processing the previous event.
-  symbol_queue_ = xQueueCreate(2, sizeof(size_t));
+  source_ = source;
+
+  // Create symbol event queue (source callback -> task)
+  symbol_queue_ = xQueueCreate(4, sizeof(size_t));
   if (symbol_queue_ == nullptr) {
     ESP_LOGE(TAG, "failed to create symbol queue");
-    free(symbol_buffer_);
-    symbol_buffer_ = nullptr;
+    source_ = nullptr;
     return ESP_ERR_NO_MEM;
   }
 
-  // Create RMT RX channel
-  esp_err_t ret = rmt_new_rx_channel(&config, &channel_);
+  // Register our frame callback with the source
+  esp_err_t ret = source_->set_on_frame_callback(on_source_frame, this);
   if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "failed to create RX channel: %s", esp_err_to_name(ret));
+    ESP_LOGE(TAG, "failed to register frame callback: %s",
+             esp_err_to_name(ret));
     vQueueDelete(symbol_queue_);
     symbol_queue_ = nullptr;
-    free(symbol_buffer_);
-    symbol_buffer_ = nullptr;
-    return ret;
-  }
-
-  // Register receive callback
-  rmt_rx_event_callbacks_t cbs = {
-      .on_recv_done = rmt_rx_done_callback,
-  };
-
-  ret = rmt_rx_register_event_callbacks(channel_, &cbs, this);
-  if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "failed to register callbacks: %s", esp_err_to_name(ret));
-    rmt_del_channel(channel_);
-    channel_ = nullptr;
-    vQueueDelete(symbol_queue_);
-    symbol_queue_ = nullptr;
-    free(symbol_buffer_);
-    symbol_buffer_ = nullptr;
+    source_ = nullptr;
     return ret;
   }
 
   initialized_ = true;
-  ESP_LOGI(TAG, "initialized on GPIO %d",
-           static_cast<int>(gpio_));
+  ESP_LOGI(TAG, "initialized");
 
   return ESP_OK;
 }
@@ -97,21 +69,12 @@ void IrReceiver::deinit() {
     stop();
   }
 
-  if (channel_) {
-    rmt_del_channel(channel_);
-    channel_ = nullptr;
-  }
-
   if (symbol_queue_) {
     vQueueDelete(symbol_queue_);
     symbol_queue_ = nullptr;
   }
 
-  if (symbol_buffer_) {
-    free(symbol_buffer_);
-    symbol_buffer_ = nullptr;
-  }
-
+  source_ = nullptr;
   initialized_ = false;
   protocol_set_ = false;
   ESP_LOGI(TAG, "deinitialized");
@@ -131,41 +94,46 @@ esp_err_t IrReceiver::set_protocol(const ProtocolConfig& config) {
   protocol_ = config;
   protocol_set_ = true;
 
-  // Compute signal_range_max_ns from protocol timings.
-  // This value tells the RMT how long a gap (no transitions) is allowed
-  // before a frame is considered finished.  It must be:
-  //   > max intra-packet space (so normal bit spaces don't split a frame)
-  //   < inter-packet gap       (so repeated transmissions are segmented)
-  uint16_t max_space = protocol_.header_space_us;
-  if (protocol_.zero_half2.is_space()) {
-    max_space = std::max(max_space, protocol_.zero_half2.duration_us);
-  }
-  if (protocol_.one_half2.is_space()) {
-    max_space = std::max(max_space, protocol_.one_half2.duration_us);
+  // Compute and apply max_symbol_duration to the source backend.
+  uint16_t max_sym_us = compute_max_symbol_duration_us(config);
+
+  esp_err_t ret = source_->set_max_symbol_duration_us(max_sym_us);
+  if (ret != ESP_OK) {
+    ESP_LOGW(TAG, "source did not accept max_symbol_duration_us=%u: %s",
+             (unsigned)max_sym_us, esp_err_to_name(ret));
   }
 
-  if (protocol_.footer_space_us > 0 &&
-      protocol_.footer_space_us > max_space) {
-    // Gap is known — set range to 2× the max intra-packet space
-    signal_range_max_ns_ = static_cast<uint32_t>(max_space) * 2 * 1000;
-    // Ensure it stays below the gap
-    uint32_t gap_ns = static_cast<uint32_t>(protocol_.footer_space_us) * 1000;
-    if (signal_range_max_ns_ >= gap_ns) {
-      signal_range_max_ns_ = gap_ns * 9 / 10;
-    }
-  } else {
-    // No gap info — generous default
-    signal_range_max_ns_ = 12000000;
-  }
-  if (signal_range_max_ns_ < 10000) {
-    signal_range_max_ns_ = 12000000;
-  }
-
-  ESP_LOGI(TAG, "protocol set: tolerance=%d%%, signal_range_max=%lu ns",
-           protocol_.tolerance_percent,
-           (unsigned long)signal_range_max_ns_);
+  ESP_LOGI(TAG, "protocol set: tolerance=%d%%, max_symbol_duration=%u us",
+           protocol_.tolerance_percent, (unsigned)max_sym_us);
 
   return ESP_OK;
+}
+
+uint16_t IrReceiver::compute_max_symbol_duration_us(
+    const ProtocolConfig& config) {
+  // Find the longest individual pulse (mark or space) across
+  // header, data half-bits, and footer.
+  uint16_t max_pulse = config.header_mark_us;
+  max_pulse = std::max(max_pulse, config.header_space_us);
+  max_pulse = std::max(max_pulse, config.zero_half1.duration_us);
+  max_pulse = std::max(max_pulse, config.zero_half2.duration_us);
+  max_pulse = std::max(max_pulse, config.one_half1.duration_us);
+  max_pulse = std::max(max_pulse, config.one_half2.duration_us);
+  max_pulse = std::max(max_pulse, config.footer_mark_us);
+
+  // 1.5x the longest pulse provides comfortable margin.
+  uint32_t result = static_cast<uint32_t>(max_pulse) * 3 / 2;
+
+  // Clamp to uint16_t range
+  if (result > UINT16_MAX) {
+    result = UINT16_MAX;
+  }
+  // Minimum 1000µs to avoid overly aggressive frame splitting
+  if (result < 1000) {
+    result = 1000;
+  }
+
+  return static_cast<uint16_t>(result);
 }
 
 esp_err_t IrReceiver::enable_raw_mode() {
@@ -188,18 +156,15 @@ esp_err_t IrReceiver::start() {
     return ESP_OK;  // Already receiving
   }
 
-  esp_err_t ret = rmt_enable(channel_);
-  if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "failed to enable channel: %s", esp_err_to_name(ret));
-    return ret;
-  }
-
   // Drain any stale events left from a previous session
   size_t dummy;
   while (xQueueReceive(symbol_queue_, &dummy, 0)) {}
 
-  // Start first capture
-  restart_receive();
+  esp_err_t ret = source_->start();
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "failed to start source: %s", esp_err_to_name(ret));
+    return ret;
+  }
 
   receiving_ = true;
   ESP_LOGI(TAG, "started receiving");
@@ -212,7 +177,7 @@ esp_err_t IrReceiver::stop() {
     return ESP_OK;
   }
 
-  esp_err_t ret = rmt_disable(channel_);
+  esp_err_t ret = source_->stop();
   receiving_ = false;
 
   ESP_LOGI(TAG, "stopped receiving");
@@ -239,7 +204,7 @@ esp_err_t IrReceiver::receive(IrMessage* message, uint32_t timeout_ms) {
     return ESP_ERR_INVALID_ARG;
   }
 
-  // Wait for symbols from ISR, decode in task context.
+  // Wait for symbols from source, decode in task context.
   // Loop to skip noise / invalid frames until a valid decode or timeout.
   TickType_t start_ticks = xTaskGetTickCount();
   TickType_t timeout_ticks = pdMS_TO_TICKS(timeout_ms);
@@ -258,21 +223,8 @@ esp_err_t IrReceiver::receive(IrMessage* message, uint32_t timeout_ms) {
       return ESP_ERR_TIMEOUT;
     }
 
-    // Copy symbols to a local buffer and restart RMT immediately.
-    // This minimises the gap before the next packet can be captured,
-    // which is critical for paired-packet protocols like IRT (2ms gap).
-    static constexpr size_t kMaxLocalSymbols = 64;
-    rmt_symbol_word_t local_buf[kMaxLocalSymbols];
-    size_t copy_count = (num_symbols < kMaxLocalSymbols)
-                            ? num_symbols : kMaxLocalSymbols;
-    memcpy(local_buf, symbol_buffer_,
-           copy_count * sizeof(rmt_symbol_word_t));
-
-    // Restart RMT for next capture (symbol_buffer_ may be overwritten)
-    restart_receive();
-
-    // Decode from local copy in task context (safe to use regular ESP_LOGD)
-    if (decode_symbols(local_buf, copy_count, message)) {
+    // Decode from the internal buffer in task context
+    if (decode_symbols(symbol_buffer_, num_symbols, message)) {
       return ESP_OK;
     }
     // Invalid frame (noise) — loop and wait for the next one
@@ -280,17 +232,7 @@ esp_err_t IrReceiver::receive(IrMessage* message, uint32_t timeout_ms) {
 }
 
 esp_err_t IrReceiver::receive_raw(RawTiming* timings, size_t max_count,
-                                  size_t* received_count, uint32_t timeout_ms) {
-  RawReceiveConfig default_config;
-  default_config.signal_range_min_ns = 1000;
-  default_config.signal_range_max_ns = signal_range_max_ns_;
-  return receive_raw(timings, max_count, received_count, default_config,
-                     timeout_ms);
-}
-
-esp_err_t IrReceiver::receive_raw(RawTiming* timings, size_t max_count,
                                   size_t* received_count,
-                                  const RawReceiveConfig& config,
                                   uint32_t timeout_ms) {
   if (!initialized_) {
     return ESP_ERR_INVALID_STATE;
@@ -311,7 +253,7 @@ esp_err_t IrReceiver::receive_raw(RawTiming* timings, size_t max_count,
                             ? num_symbols
                             : max_count;
 
-    // Convert RMT symbols to RawTiming
+    // Convert symbols to RawTiming
     for (size_t i = 0; i < copy_count; i++) {
       const auto& sym = symbol_buffer_[i];
 
@@ -328,53 +270,28 @@ esp_err_t IrReceiver::receive_raw(RawTiming* timings, size_t max_count,
     }
 
     *received_count = copy_count * 2;  // Each symbol has 2 parts
-
-    // Restart RMT with caller-provided thresholds
-    restart_receive(config);
     return ESP_OK;
   }
 
   return ESP_ERR_TIMEOUT;
 }
 
-bool IRAM_ATTR IrReceiver::rmt_rx_done_callback(
-    rmt_channel_handle_t channel,
-    const rmt_rx_done_event_data_t* edata,
-    void* user_ctx) {
-  auto* receiver = static_cast<IrReceiver*>(user_ctx);
-  return receiver->on_receive_done(edata);
-  // NOTE: No restart here — the task calls restart_receive() after
-  // processing the symbols.  This guarantees symbol_buffer_ is stable
-  // when the task reads it.
-}
+void IRAM_ATTR IrReceiver::on_source_frame(const rmt_symbol_word_t* symbols,
+                                 size_t count, void* ctx) {
+  auto* self = static_cast<IrReceiver*>(ctx);
 
-bool IRAM_ATTR IrReceiver::on_receive_done(
-    const rmt_rx_done_event_data_t* edata) {
+  // Copy symbols to internal buffer (may be called from ISR context)
+  size_t copy_count = (count < kSymbolBufferSize) ? count : kSymbolBufferSize;
+  memcpy(self->symbol_buffer_, symbols,
+         copy_count * sizeof(rmt_symbol_word_t));
+
+  // Queue the count for task-context processing.
+  // Use FromISR variant since source backends (e.g. RMT) may invoke
+  // this from ISR context.
   BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-  size_t num_symbols = edata->num_symbols;
-  xQueueSendFromISR(symbol_queue_, &num_symbols, &xHigherPriorityTaskWoken);
-  return xHigherPriorityTaskWoken == pdTRUE;
-}
-
-void IrReceiver::restart_receive() {
-  RawReceiveConfig default_config;
-  default_config.signal_range_min_ns = 1000;
-  default_config.signal_range_max_ns = signal_range_max_ns_;
-  restart_receive(default_config);
-}
-
-void IrReceiver::restart_receive(const RawReceiveConfig& config) {
-  rmt_receive_config_t rx_config = {
-      .signal_range_min_ns = config.signal_range_min_ns,
-      .signal_range_max_ns = config.signal_range_max_ns,
-      .flags = {
-          .en_partial_rx = 0,
-      },
-  };
-
-  rmt_receive(channel_, symbol_buffer_,
-              symbol_buffer_size_ * sizeof(rmt_symbol_word_t),
-              &rx_config);
+  xQueueSendFromISR(self->symbol_queue_, &copy_count,
+                    &xHigherPriorityTaskWoken);
+  portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
 
 bool IrReceiver::timing_matches(uint16_t actual, uint16_t expected,

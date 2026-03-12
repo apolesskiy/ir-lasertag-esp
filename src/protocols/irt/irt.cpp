@@ -206,8 +206,8 @@ bool IrtGun::validate_pair(uint16_t gun_id) {
 
   // Check for paired packet validation
   // IRT guns send the same ID twice with ~2ms gap.
-  // After RMT frame segmentation + decode, the measured delta is
-  // typically ~18ms (packet duration + signal_range_max wait).
+  // After frame segmentation + decode, the measured delta is
+  // typically ~18ms (packet duration + max_symbol_duration wait).
   if (last_gun_id_ == gun_id &&
       (now_us - last_receive_time_us_) <= kPairTimeoutUs) {
     // Valid paired packet
