@@ -1,4 +1,4 @@
-version: "0.1.0"
+version: "0.2.0"
 description: "IR laser tag protocol library for ESP32 (IRT, Arclite)"
 url: "https://github.com/apolesskiy/ir-lasertag-esp"
 
