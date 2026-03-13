@@ -124,17 +124,23 @@ esp_err_t IrTransmitter::set_protocol(const ProtocolConfig& config) {
     return ret;
   }
 
-  // Apply carrier modulation
-  rmt_carrier_config_t carrier_config = {
-      .frequency_hz = protocol_.carrier_freq_hz,
-      .duty_cycle = protocol_.carrier_duty,
-      .flags = {
-          .polarity_active_low = 0,
-          .always_on = 0,
-      },
-  };
+  // Apply carrier modulation (duty 1.0 = disable carrier entirely)
+  esp_err_t carrier_ret;
+  if (protocol_.carrier_duty >= 1.0f) {
+    carrier_ret = rmt_apply_carrier(channel_, nullptr);
+  } else {
+    rmt_carrier_config_t carrier_config = {
+        .frequency_hz = protocol_.carrier_freq_hz,
+        .duty_cycle = protocol_.carrier_duty,
+        .flags = {
+            .polarity_active_low = 0,
+            .always_on = 0,
+        },
+    };
+    carrier_ret = rmt_apply_carrier(channel_, &carrier_config);
+  }
 
-  ret = rmt_apply_carrier(channel_, &carrier_config);
+  ret = carrier_ret;
   if (ret != ESP_OK) {
     ESP_LOGE(TAG, "failed to apply carrier: %s", esp_err_to_name(ret));
     return ret;
@@ -163,16 +169,20 @@ esp_err_t IrTransmitter::set_carrier_duty(float duty) {
 
   protocol_.carrier_duty = duty;
 
-  rmt_carrier_config_t carrier_config = {
-      .frequency_hz = protocol_.carrier_freq_hz,
-      .duty_cycle = duty,
-      .flags = {
-          .polarity_active_low = 0,
-          .always_on = 0,
-      },
-  };
-
-  esp_err_t ret = rmt_apply_carrier(channel_, &carrier_config);
+  esp_err_t ret;
+  if (duty >= 1.0f) {
+    ret = rmt_apply_carrier(channel_, nullptr);
+  } else {
+    rmt_carrier_config_t carrier_config = {
+        .frequency_hz = protocol_.carrier_freq_hz,
+        .duty_cycle = duty,
+        .flags = {
+            .polarity_active_low = 0,
+            .always_on = 0,
+        },
+    };
+    ret = rmt_apply_carrier(channel_, &carrier_config);
+  }
   if (ret != ESP_OK) {
     ESP_LOGE(TAG, "failed to apply carrier: %s", esp_err_to_name(ret));
     return ret;
