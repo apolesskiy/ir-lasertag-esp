@@ -169,7 +169,7 @@ class IrReceiver {
   /**
    * @brief Compute max_symbol_duration_us from protocol timings.
    *
-   * Returns 3x the longest individual pulse (mark or space) in the
+   * Returns 1.5x the longest individual pulse (mark or space) in the
    * protocol definition. Covers header, data half-bits, and footer.
    *
    * @param config Protocol configuration.
