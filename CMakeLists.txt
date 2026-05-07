@@ -10,6 +10,7 @@ idf_component_register(
     "src/codec/rmt_rx_source.cpp"
     # Protocol layer (protocol-specific message APIs)
     "src/protocols/arclite/arclite.cpp"
+    "src/protocols/bc/bc.cpp"
     "src/protocols/irt/irt.cpp"
   INCLUDE_DIRS
     "include"
