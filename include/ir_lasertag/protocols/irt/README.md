@@ -81,11 +81,20 @@ Spawners send a static ID.
 
 ## API
 
-- `IrtGun::init()` — Initialize with transmitter and/or receiver.
-- `IrtGun::send(uint16_t gun_id)` — Transmit gun ID (2× with 2ms gap).
-- `IrtGun::start_receive(callback)` — Start receiving gun IDs asynchronously.
+- `kIrtConfig` — Default `ProtocolConfig` for the IRT protocol.
+- `make_irt_config()` — Returns a copy of `kIrtConfig`.
+- `IrtGun::init(transmitter, receiver, config)` — Bind codec-layer TX/RX (either may be null) and apply config.
+- `IrtGun::deinit()` — Release TX/RX references and stop receive.
+- `IrtGun::is_initialized()` — Check initialization state.
+- `IrtGun::send(gun_id, timeout_ms = 1000)` — Transmit a 16-bit gun ID; sends the required pair (2× with 2 ms gap) internally (blocking).
+- `IrtGun::start_receive()` — Start the receiver for polling gun IDs (paired-packet validation is automatic).
 - `IrtGun::stop_receive()` — Stop receiving.
-- `IrtGun::get_ccm_id(uint16_t)` — Extract CCM ID from gun ID.
-- `IrtGun::is_unassigned(uint16_t)` — Check if gun is unassigned (0xF0F0).
+- `IrtGun::is_receiving()` — Check if receive is active.
+- `IrtGun::try_receive(&gun_id)` — Non-blocking poll for a validated gun ID.
+- `IrtGun::receive(&gun_id, timeout_ms)` — Blocking receive with timeout.
+- `IrtGun::get_ccm_id(uint16_t)` — (static) Extract CCM ID (low byte) from a gun ID.
+- `IrtGun::is_unassigned(uint16_t)` — (static) Check if a gun ID is unassigned (0xF0F0).
+
+Receive is poll/queue-based and runs in task context (`try_receive` / `receive`); there is no callback registration.
 
 See [irt.hpp](irt.hpp) for detailed API documentation.

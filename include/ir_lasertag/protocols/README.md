@@ -96,6 +96,6 @@ The README links readers to the header for details; it does not repeat them.
   blocking `IrTransmitter::send()` with appropriate delays.
 - Protocol-specific types (message structs, enums) are defined in the
   protocol header, not in the codec layer.
-- The `protocol_registry` in `main/` holds `ProtocolConfig` entries for
-  codec-level configuration. Protocol wrappers reference these configs
-  but do not own them.
+- Each protocol's default `ProtocolConfig` (e.g. `kArcliteConfig`) is
+  defined in that protocol's header. Consuming applications choose which
+  configs to use; the library does not maintain a central registry.

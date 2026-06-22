@@ -23,6 +23,10 @@ and hobbyist laser tag systems implement MilesTag compatibility.
 | Bit Count | 14 bits |
 | Bit Order | MSB first |
 
+MilesTag does not mandate a carrier frequency; both 38 kHz and 56 kHz are
+used in practice. `kMilestagConfig` currently defaults to 38 kHz. A
+user-configurable carrier is planned.
+
 ## Message Structure
 
 Standard MilesTag messages are 14 bits:
