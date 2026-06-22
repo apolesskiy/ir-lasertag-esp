@@ -136,7 +136,7 @@ See header files for full parameter documentation:
 ### Protocols
 
 - [`arclite.hpp`](include/ir_lasertag/protocols/arclite/arclite.hpp) — `ArcliteTagCode` class
-- [`irt.hpp`](include/ir_lasertag/protocols/irt/irt.hpp) — `IrtGun` class
+- [`irt.hpp`](include/ir_lasertag/protocols/irt/irt.hpp) — `Irt` class (gun + spawner)
 - [`milestag.hpp`](include/ir_lasertag/protocols/milestag/milestag.hpp) — `kMilestagConfig` constants
 
 ## Requirements

@@ -37,7 +37,7 @@ Single native executable `test_ir_protocol` (ctest test name `ir_protocol_tests`
 |---|---|
 | `test_protocol_config.cpp` | `ProtocolConfig` validation (`is_valid`): carrier freq/duty bounds, zero/one half-bit durations, zero≠one distinctness, tolerance_percent ≤ 50, mark_bias range, bit_count ≤ 128; helpers `is_manchester`, `zero_bit_duration_us`/`one_bit_duration_us`, `HalfBit::is_mark`/`is_space`; representative Manchester / pulse-width / pulse-distance / Arclite / IRT configs |
 | `test_arclite_tagcode.cpp` | Arclite TagCode 16-bit MSB-first encode/decode round-trips and `IrMessage` validation (bit_count==16, valid flag) using the same data logic as `ArcliteTagCode`; reconstructed locally since the hardware wrapper is not linked |
-| `test_irt_gun.cpp` | `kIrtConfig`/`make_irt_config` properties (38 kHz, MSB-first, 16-bit, header, pulse-width marks, footer gap), gun-ID encode/decode round-trips, and `IrtGun` static helpers `get_ccm_id`/`is_unassigned`/`kUnassignedId` (links `protocols/irt/irt.hpp` for constants/static methods only) |
+| `test_irt_gun.cpp` | `kIrtConfig`/`make_irt_config` properties (38 kHz, MSB-first, 16-bit, header, pulse-width marks, footer gap), ID encode/decode round-trips, `Irt` static helpers `get_ccm_id`/`is_unassigned`/`kUnassignedId`, and the pure `Irt::classify` role-detection logic (gun/spawner/invalid/hold) plus the `IrtMessage` result struct (links `protocols/irt/irt.hpp` header-only — constants, static methods, inline `classify`) |
 
 ### Scope Limits
 

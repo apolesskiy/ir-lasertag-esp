@@ -79,8 +79,8 @@ Every protocol **must** include a `README.md` with:
 
 ## API
 
-- `IrtGun::send(uint16_t id)` — Transmit a gun packet.
-- `IrtGun::receive()` — Receive and validate a paired gun packet.
+- `Irt::send_gun(uint16_t id)` — Transmit a gun packet (paired).
+- `Irt::send_spawner(uint16_t id)` — Transmit a spawner packet (single).
 ```
 
 ### Header Documentation

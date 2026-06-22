@@ -1,11 +1,16 @@
 /**
  * @file irt.hpp
- * @brief IRT Gun protocol wrapper.
+ * @brief IRT protocol wrapper (gun + spawner).
  *
- * Provides send/receive operations for IRT Gun 16-bit ID packets.
- * IRT guns transmit a 16-bit ID in format 0xXXYY where XX is the
- * high byte (unknown purpose) and YY is the CCM ID. Guns not assigned
- * a CCM ID send 0xF0F0.
+ * Provides send/receive operations for IRT 16-bit messages. IRT devices
+ * come in two roles, distinguished by transmission pattern:
+ *  - Guns transmit the 16-bit ID twice with a ~2ms gap (format 0xXXYY,
+ *    where YY is the CCM ID; unassigned guns send 0xF0F0).
+ *  - Spawners transmit a static 16-bit ID once (no repeat), repeated at
+ *    their own cadence (~50ms).
+ *
+ * The receiver classifies incoming packets into gun / spawner / invalid
+ * by arrival pattern and returns a structured IrtMessage{ id, role }.
  *
  * This wrapper is application-layer code that runs in task context,
  * using the codec layer's queue-based receive API.
@@ -25,7 +30,7 @@ namespace ir_lasertag {
 namespace protocols {
 
 // ============================================================================
-// IRT Gun Protocol Constants
+// IRT Protocol Constants
 // ============================================================================
 
 /// @name Timing Constants
@@ -52,7 +57,7 @@ constexpr uint16_t kIrtOneMarkUs = 700;
 /// One bit space duration in microseconds
 constexpr uint16_t kIrtOneSpaceUs = 450;
 
-/// Gap between repeated transmissions in microseconds
+/// Gap between a gun's repeated transmissions in microseconds
 constexpr uint32_t kIrtMessageGapUs = 2000;
 
 /// Message bit count
@@ -61,7 +66,7 @@ constexpr uint8_t kIrtBitCount = 16;
 /// @}
 
 /**
- * @brief Default IRT Gun protocol configuration.
+ * @brief Default IRT protocol configuration.
  *
  * Pulse-width encoding:
  * - 500µs header mark, 500µs header space
@@ -70,10 +75,9 @@ constexpr uint8_t kIrtBitCount = 16;
  * - 16-bit messages, MSB first
  * - 38kHz carrier
  *
- * Note: IRT guns repeat each message twice with a 2000µs gap.
- * The gap is encoded as footer_space_us; the protocol wrapper sends
- * with loop_count=2 so the RMT peripheral handles both iterations
- * atomically.
+ * The encoding is identical for guns and spawners; only the repeat
+ * pattern differs (see Irt::send_gun / Irt::send_spawner). The 2000µs
+ * footer space supplies the gun inter-packet gap when sending a pair.
  */
 constexpr codec::ProtocolConfig kIrtConfig = {
     .carrier_freq_hz = kIrtCarrierHz,
@@ -93,74 +97,100 @@ constexpr codec::ProtocolConfig kIrtConfig = {
 };
 
 // ============================================================================
-// IrtGun Class
+// Receive Result Types
 // ============================================================================
 
 /**
- * @brief IRT Gun protocol wrapper.
+ * @brief Role of a received IRT message, inferred from arrival pattern.
+ */
+enum class IrtRole : uint8_t {
+  kGun,      ///< Two identical packets within the pair window.
+  kSpawner,  ///< A single packet with no matching pair within the window.
+};
+
+/**
+ * @brief A classified IRT receive result: the 16-bit ID and its role.
+ */
+struct IrtMessage {
+  uint16_t id;    ///< 16-bit message ID.
+  IrtRole role;   ///< Detected role (gun or spawner).
+};
+
+/**
+ * @brief Outcome of classifying an incoming packet against a held candidate.
+ */
+enum class IrtPairResult : uint8_t {
+  kHold,     ///< No candidate held; store the incoming packet as candidate.
+  kGun,      ///< Matching pair within window; emit gun, clear candidate.
+  kSpawner,  ///< Incoming arrived beyond window; emit candidate as spawner,
+             ///< then hold the incoming packet as the new candidate.
+  kReplace,  ///< Mismatch within window; discard the old candidate and hold the
+             ///< incoming packet as the new candidate (sliding; no output).
+};
+
+// ============================================================================
+// Irt Class
+// ============================================================================
+
+/**
+ * @brief IRT protocol wrapper for gun and spawner messages.
  *
- * Wraps the IR codec layer to provide an IRT Gun-level API.
- * IRT guns send a 16-bit ID twice with a 2ms gap between
- * transmissions. The receiver validates paired packets.
+ * Wraps the IR codec layer with IRT semantics. Sends gun shots (paired
+ * 16-bit packets, 2ms gap) or spawner pulses (single packets), and
+ * classifies received packets into gun / spawner / invalid by arrival
+ * pattern, returning an IrtMessage{ id, role }.
  *
  * This wrapper runs in task context and uses blocking/non-blocking
  * queue-based receive operations from the codec layer.
  *
  * Usage:
  * @code
- *   IrtGun gun;
- *   gun.init(tx_channel, rx_channel, irt_config);
+ *   Irt irt;
+ *   irt.init(tx_channel, rx_channel, irt_config);
  *
- *   // Send a gun ID (transmits twice with 2ms gap)
- *   gun.send(0xC804);
+ *   irt.send_gun(0xC804);      // gun shot (transmitted twice, 2ms gap)
+ *   irt.send_spawner(0x37FB);  // single spawner packet
  *
- *   // Poll for received gun IDs (non-blocking)
- *   uint16_t gun_id;
- *   if (gun.try_receive(&gun_id)) {
- *     ESP_LOGI("rx", "Got gun ID: 0x%04X (CCM: %d)",
- *              gun_id, gun_id & 0xFF);
- *   }
- *
- *   // Or block until one is received
- *   if (gun.receive(&gun_id, 1000) == ESP_OK) {
- *     ESP_LOGI("rx", "Got gun ID: 0x%04X", gun_id);
+ *   irt.start_receive();
+ *   IrtMessage msg;
+ *   if (irt.try_receive(&msg)) {
+ *     ESP_LOGI("rx", "id=0x%04X role=%s", msg.id,
+ *              msg.role == IrtRole::kGun ? "gun" : "spawner");
  *   }
  * @endcode
  */
-class IrtGun {
+class Irt {
  public:
-  /// Gap between repeated transmissions in microseconds.
+  /// Gap between a gun's repeated transmissions in microseconds.
   static constexpr uint32_t kRepeatGapUs = 2000;
 
   /// Unassigned gun ID (no CCM assignment).
   static constexpr uint16_t kUnassignedId = 0xF0F0;
 
-  /// Maximum time between paired packets during receive validation (µs).
-  /// The actual gap depends on packet duration (~16ms) plus the RMT
-  /// signal_range_max wait (~1ms) plus task scheduling.
-  static constexpr int64_t kPairTimeoutUs = 50000;
+  /// Maximum receive-side inter-arrival delta for two packets to count as a
+  /// gun pair (µs). A gun's two packets arrive ~18ms apart (packet duration
+  /// plus the 2ms gap); spawner repeats arrive ~50ms apart. 30ms sits between
+  /// the two so gun pairs are matched while spawner repeats age out as singles.
+  static constexpr int64_t kPairWindowUs = 30000;
 
-  IrtGun();
-  ~IrtGun();
+  Irt();
+  ~Irt();
 
   // Non-copyable
-  IrtGun(const IrtGun&) = delete;
-  IrtGun& operator=(const IrtGun&) = delete;
+  Irt(const Irt&) = delete;
+  Irt& operator=(const Irt&) = delete;
 
   /**
    * @brief Initialize with pre-configured transmitter and receiver.
    *
-   * The caller retains ownership of the transmitter and receiver.
-   * Both must remain valid for the lifetime of this object (or until
-   * deinit() is called). Either may be nullptr if only send or
-   * receive is needed.
-   *
-   * The protocol configuration is applied to both the transmitter
-   * and receiver.
+   * The caller retains ownership of the transmitter and receiver. Both
+   * must remain valid for the lifetime of this object (or until deinit()).
+   * Either may be nullptr if only send or receive is needed. The protocol
+   * configuration is applied to both.
    *
    * @param transmitter Pointer to an initialized IrTransmitter (nullable).
    * @param receiver Pointer to an initialized IrReceiver (nullable).
-   * @param config IRT Gun protocol configuration.
+   * @param config IRT protocol configuration.
    * @return ESP_OK on success, ESP_ERR_INVALID_ARG if both are null,
    *         or error from set_protocol().
    */
@@ -171,83 +201,119 @@ class IrtGun {
    * @brief Release references to transmitter/receiver.
    *
    * Stops any active receive operation. Does not deinitialize the
-   * underlying transmitter/receiver — the caller manages their
-   * lifetime.
+   * underlying transmitter/receiver — the caller manages their lifetime.
    */
   void deinit();
 
   /**
    * @brief Check if the protocol wrapper is initialized.
-   *
    * @return true if init() has been called successfully.
    */
   bool is_initialized() const { return initialized_; }
 
   /**
-   * @brief Transmit a 16-bit gun ID (blocking).
+   * @brief Transmit a gun shot (blocking).
    *
-   * Sends the gun ID as two 16-bit packets with a 2ms gap between
-   * them as per IRT protocol. Blocks until both transmissions
-   * are complete.
+   * Sends the 16-bit ID twice with a 2ms gap, as required for IRT gun
+   * shots. Blocks until both transmissions complete.
    *
-   * @param gun_id The 16-bit gun ID to transmit (0xXXYY format).
-   * @param timeout_ms Maximum time to wait for each transmission (default 1000ms).
+   * @param id The 16-bit gun ID to transmit (0xXXYY format).
+   * @param timeout_ms Maximum time to wait for transmission (default 1000ms).
    * @return ESP_OK on success, ESP_ERR_INVALID_STATE if no transmitter,
    *         ESP_ERR_TIMEOUT on timeout, or codec error.
    */
-  esp_err_t send(uint16_t gun_id, uint32_t timeout_ms = 1000);
+  esp_err_t send_gun(uint16_t id, uint32_t timeout_ms = 1000);
 
   /**
-   * @brief Start the receiver for polling gun IDs.
+   * @brief Transmit a single spawner packet (blocking).
    *
-   * After calling this, use try_receive() or receive() to poll
-   * for received gun IDs. Paired packet validation is performed
-   * automatically.
+   * Sends the 16-bit ID once (no repeat). Spawners emit continuously at
+   * ~50ms intervals; the caller controls that cadence.
+   *
+   * @param id The 16-bit spawner ID to transmit.
+   * @param timeout_ms Maximum time to wait for transmission (default 1000ms).
+   * @return ESP_OK on success, ESP_ERR_INVALID_STATE if no transmitter,
+   *         ESP_ERR_TIMEOUT on timeout, or codec error.
+   */
+  esp_err_t send_spawner(uint16_t id, uint32_t timeout_ms = 1000);
+
+  /**
+   * @brief Start the receiver for polling messages.
+   *
+   * After calling this, use try_receive() or receive() to poll for
+   * classified gun/spawner messages.
    *
    * @return ESP_OK on success, ESP_ERR_INVALID_STATE if no receiver.
    */
   esp_err_t start_receive();
 
   /**
-   * @brief Stop receiving gun IDs.
-   *
+   * @brief Stop receiving.
    * @return ESP_OK on success, ESP_ERR_INVALID_STATE if not receiving.
    */
   esp_err_t stop_receive();
 
   /**
    * @brief Check if receiving is active.
-   *
    * @return true if start_receive() has been called and not yet stopped.
    */
   bool is_receiving() const { return receiving_; }
 
   /**
-   * @brief Try to receive a gun ID without blocking.
+   * @brief Try to receive a classified message without blocking.
    *
-   * Polls the receive queue and performs paired packet validation.
-   * Returns immediately whether or not a gun ID is available.
+   * Drains the receive queue and runs role detection. Returns immediately.
+   * A gun is reported once its matching pair is seen; a spawner is reported
+   * once the pair window elapses with no matching pair. Invalid pairs are
+   * dropped.
    *
-   * @param[out] gun_id Receives the gun ID if a valid pair is available.
-   * @return true if a validated gun ID was received, false otherwise.
+   * @param[out] msg Receives the classified message (id + role) if available.
+   * @return true if a classified message was produced, false otherwise.
    */
-  bool try_receive(uint16_t* gun_id);
+  bool try_receive(IrtMessage* msg);
 
   /**
-   * @brief Receive a gun ID with timeout.
+   * @brief Receive a classified message with timeout.
    *
-   * Blocks until a validated paired gun ID is received or timeout expires.
+   * Polls at a short interval (so a lone spawner can be flushed after the
+   * pair window) until a message is classified or the timeout expires.
    *
-   * @param[out] gun_id Receives the gun ID.
+   * @param[out] msg Receives the classified message.
    * @param timeout_ms Maximum time to wait in milliseconds.
    * @return ESP_OK if received, ESP_ERR_TIMEOUT on timeout,
    *         ESP_ERR_INVALID_STATE if not receiving.
    */
-  esp_err_t receive(uint16_t* gun_id, uint32_t timeout_ms);
+  esp_err_t receive(IrtMessage* msg, uint32_t timeout_ms);
 
   /**
-   * @brief Extract CCM ID from gun ID.
+   * @brief Classify an incoming packet against a held candidate (pure).
    *
+   * Encapsulates the gun/spawner/invalid decision so it can be unit-tested
+   * without hardware. Caller supplies the candidate state and the measured
+   * inter-arrival delta.
+   *
+   * @param has_candidate Whether a candidate packet is currently held.
+   * @param candidate_id The held candidate's ID (ignored if !has_candidate).
+   * @param incoming_id The newly decoded packet's ID.
+   * @param delta_us Microseconds since the candidate arrived.
+   * @param pair_window_us Max delta for two packets to form a gun pair.
+   * @return The classification outcome (see IrtPairResult).
+   */
+  static IrtPairResult classify(bool has_candidate, uint16_t candidate_id,
+                                uint16_t incoming_id, int64_t delta_us,
+                                int64_t pair_window_us) {
+    if (!has_candidate) {
+      return IrtPairResult::kHold;
+    }
+    if (delta_us > pair_window_us) {
+      return IrtPairResult::kSpawner;
+    }
+    return (incoming_id == candidate_id) ? IrtPairResult::kGun
+                                         : IrtPairResult::kReplace;
+  }
+
+  /**
+   * @brief Extract CCM ID from a gun ID.
    * @param gun_id Full 16-bit gun ID.
    * @return The 8-bit CCM ID (low byte).
    */
@@ -256,8 +322,7 @@ class IrtGun {
   }
 
   /**
-   * @brief Check if gun ID indicates unassigned CCM.
-   *
+   * @brief Check if a gun ID indicates unassigned CCM.
    * @param gun_id Full 16-bit gun ID.
    * @return true if gun is unassigned (0xF0F0).
    */
@@ -267,37 +332,42 @@ class IrtGun {
 
  private:
   /**
-   * @brief Decode an IR message to a gun ID.
-   *
+   * @brief Decode an IR message to a 16-bit ID.
    * @param message The received IR message.
-   * @return The gun ID if valid, std::nullopt otherwise.
+   * @return The ID if valid, std::nullopt otherwise.
    */
   static std::optional<uint16_t> decode_message(const codec::IrMessage& message);
 
   /**
-   * @brief Process a raw packet and validate pairing.
+   * @brief Feed one decoded packet through the role-detection state machine.
    *
-   * @param gun_id The decoded gun ID from the packet.
-   * @return true if this completes a valid pair, false otherwise.
+   * Updates the held-candidate state and, when a gun or spawner is resolved,
+   * writes it to @p out.
+   *
+   * @param id Decoded 16-bit packet ID.
+   * @param now_us Arrival timestamp in microseconds (esp_timer).
+   * @param[out] out Receives the classified message when one is produced.
+   * @return true if a classified message was produced, false otherwise.
    */
-  bool validate_pair(uint16_t gun_id);
+  bool process_packet(uint16_t id, int64_t now_us, IrtMessage* out);
 
   codec::IrTransmitter* transmitter_ = nullptr;
   codec::IrReceiver* receiver_ = nullptr;
-  uint8_t send_data_[2] = {};       ///< Persistent buffer for transmit
-  uint16_t last_gun_id_ = 0;        ///< Last received gun ID for pair validation
-  int64_t last_receive_time_us_ = 0; ///< Timestamp of last receive (µs)
+  uint8_t send_data_[2] = {};         ///< Persistent buffer for transmit
+  uint16_t candidate_id_ = 0;         ///< Held candidate ID (pair detection)
+  int64_t candidate_time_us_ = 0;     ///< Candidate arrival timestamp (µs)
+  bool has_candidate_ = false;        ///< Whether a candidate is held
   bool initialized_ = false;
   bool receiving_ = false;
 };
 
 /**
- * @brief Get default IRT Gun protocol configuration.
+ * @brief Get default IRT protocol configuration.
  *
- * Returns a copy of kIrtConfig. Prefer using the constexpr
- * kIrtConfig directly when a reference suffices.
+ * Returns a copy of kIrtConfig. Prefer using the constexpr kIrtConfig
+ * directly when a reference suffices.
  *
- * @return Protocol configuration for IRT Gun.
+ * @return Protocol configuration for IRT.
  * @see kIrtConfig
  */
 codec::ProtocolConfig make_irt_config();

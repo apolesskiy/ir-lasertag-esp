@@ -4,6 +4,8 @@
 
 IRT is a commercial laser tag system. IRT messages are 16 bits. Guns and spawners have slightly different behaviors and meanings of the ID.
 
+The `Irt` wrapper sends and receives both roles. On receive it classifies each message by arrival pattern and returns an `IrtMessage{ id, role }`, where `role` is `IrtRole::kGun` or `IrtRole::kSpawner`.
+
 ## IR Encoding
 
 | Parameter      | Value          |
@@ -27,6 +29,16 @@ IRT guns and spawners behave differently.
 * **Guns** transmit the gun's 16-bit ID twice with a repeat gap of 2000µs. This is *required* and the gunshot will not be received if the repeated message is not present.
 
 * **Spawners** transmit a static 16-bit ID *once* every 50ms during continuous spawn mode or while the button is pressed in manual mode.
+
+### Reception (Role Detection)
+
+The receiver infers the role from the arrival pattern of decoded packets:
+
+* Two identical packets within the pair window (`kPairWindowUs`, 30 ms) → **gun**.
+* A packet with no matching pair within the window → **spawner** (reported once the window elapses).
+* A non-matching packet within the window → the older candidate is discarded and the new packet becomes the candidate (sliding; e.g. `X Y Y` → `gun(Y)`).
+
+The 30 ms window sits between a gun pair's ~18 ms receive-side inter-arrival (packet duration + 2 ms gap) and a spawner's ~50 ms repeat interval.
 
 
 ## Example ID Patterns
@@ -81,20 +93,23 @@ Spawners send a static ID.
 
 ## API
 
+Types: `IrtRole` (`kGun` / `kSpawner`) and `IrtMessage { uint16_t id; IrtRole role; }`.
+
 - `kIrtConfig` — Default `ProtocolConfig` for the IRT protocol.
 - `make_irt_config()` — Returns a copy of `kIrtConfig`.
-- `IrtGun::init(transmitter, receiver, config)` — Bind codec-layer TX/RX (either may be null) and apply config.
-- `IrtGun::deinit()` — Release TX/RX references and stop receive.
-- `IrtGun::is_initialized()` — Check initialization state.
-- `IrtGun::send(gun_id, timeout_ms = 1000)` — Transmit a 16-bit gun ID; sends the required pair (2× with 2 ms gap) internally (blocking).
-- `IrtGun::start_receive()` — Start the receiver for polling gun IDs (paired-packet validation is automatic).
-- `IrtGun::stop_receive()` — Stop receiving.
-- `IrtGun::is_receiving()` — Check if receive is active.
-- `IrtGun::try_receive(&gun_id)` — Non-blocking poll for a validated gun ID.
-- `IrtGun::receive(&gun_id, timeout_ms)` — Blocking receive with timeout.
-- `IrtGun::get_ccm_id(uint16_t)` — (static) Extract CCM ID (low byte) from a gun ID.
-- `IrtGun::is_unassigned(uint16_t)` — (static) Check if a gun ID is unassigned (0xF0F0).
+- `Irt::init(transmitter, receiver, config)` — Bind codec-layer TX/RX (either may be null) and apply config.
+- `Irt::deinit()` — Release TX/RX references and stop receive.
+- `Irt::is_initialized()` — Check initialization state.
+- `Irt::send_gun(id, timeout_ms = 1000)` — Transmit a gun shot: the 16-bit ID twice with a 2 ms gap (blocking).
+- `Irt::send_spawner(id, timeout_ms = 1000)` — Transmit a single spawner packet (blocking).
+- `Irt::start_receive()` — Start the receiver for polling messages.
+- `Irt::stop_receive()` — Stop receiving.
+- `Irt::is_receiving()` — Check if receive is active.
+- `Irt::try_receive(&msg)` — Non-blocking poll; on success fills `IrtMessage` with the id and detected role.
+- `Irt::receive(&msg, timeout_ms)` — Blocking receive with timeout.
+- `Irt::get_ccm_id(uint16_t)` — (static) Extract CCM ID (low byte) from a gun ID.
+- `Irt::is_unassigned(uint16_t)` — (static) Check if a gun ID is unassigned (0xF0F0).
 
-Receive is poll/queue-based and runs in task context (`try_receive` / `receive`); there is no callback registration.
+Receive is poll/queue-based and runs in task context (`try_receive` / `receive`); there is no callback registration. Invalid pairs are dropped.
 
 See [irt.hpp](irt.hpp) for detailed API documentation.

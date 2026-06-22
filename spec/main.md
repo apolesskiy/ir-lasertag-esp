@@ -40,7 +40,7 @@ README.md
 
 `ir-lasertag-esp` is a standalone, reusable ESP-IDF component (C++17, MIT) for IR laser-tag signalling. It is a general-use library: downstream consumers are not assumed to use Speck. The user-facing API and documentation are the README files (preserved as artifacts) and the public headers under `include/ir_lasertag/`.
 
-Component metadata: `idf_component.yml` (version 0.2.0). Target: any ESP32 variant with an RMT peripheral; ESP-IDF ≥ v5.3. Consumption and install: see `README.md` and `spec/rules/esp-idf-component.md`.
+Component metadata: `idf_component.yml` (version 0.3.0; 0.3.0 introduced the breaking IRT API — `IrtGun` → `Irt` with gun/spawner roles). Target: any ESP32 variant with an RMT peripheral; ESP-IDF ≥ v5.3. Consumption and install: see `README.md` and `spec/rules/esp-idf-component.md`.
 
 ### Architecture
 
@@ -68,6 +68,6 @@ Per `.speck/rules/feature-system.md`:
 | BC | pulse-width | 16 | 38 kHz | none | `spec/features/protocols/bc.md` |
 | MilesTag | pulse-distance | 14 | 38 kHz | none | `spec/features/protocols/milestag.md` |
 
-MilesTag is currently config-only (timing constants + `kMilestagConfig`); no wrapper class is implemented (a structured-field wrapper is planned). The other three provide wrapper classes (`ArcliteTagCode`, `IrtGun`, `BcGun`).
+MilesTag is currently config-only (timing constants + `kMilestagConfig`); no wrapper class is implemented (a structured-field wrapper is planned). The other three provide wrapper classes (`ArcliteTagCode`, `Irt`, `BcGun`).
 
 The user-facing `README.md` "Supported Protocols" table lists only protocols validated against real hardware; an implemented-but-untested protocol (currently BC) is absent from it until field-tested (see `spec/rules/protocol-authoring.md`).

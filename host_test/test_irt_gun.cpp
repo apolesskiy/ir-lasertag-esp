@@ -1,8 +1,8 @@
 /**
  * @file test_irt_gun.cpp
- * @brief Host-based unit tests for IRT Gun protocol logic.
+ * @brief Host-based unit tests for IRT protocol logic.
  *
- * Tests the data encoding/decoding logic used by IrtGun without
+ * Tests the data encoding/decoding logic used by Irt without
  * requiring hardware (IrTransmitter/IrReceiver). The codec callback
  * logic is tested by directly constructing IrMessage structs and
  * verifying the expected gun ID extraction.
@@ -42,7 +42,7 @@ int tests_failed = 0;
   } while (0)
 
 // ============================================================================
-// Helpers: encode / decode gun ID (mirrors IrtGun::send / decode_message)
+// Helpers: encode / decode gun ID (mirrors Irt::send_gun / decode_message)
 // ============================================================================
 
 /**
@@ -158,7 +158,7 @@ void test_encode_msb_first() {
 
 void test_encode_unassigned() {
   uint8_t data[2] = {};
-  encode_gun_id(IrtGun::kUnassignedId, data);
+  encode_gun_id(Irt::kUnassignedId, data);
   TEST_ASSERT(data[0] == 0xF0);
   TEST_ASSERT(data[1] == 0xF0);
 }
@@ -254,7 +254,7 @@ void test_invalid_message_not_valid() {
 }
 
 void test_unassigned_gun_id_message() {
-  IrMessage msg = make_gun_id_message(IrtGun::kUnassignedId);
+  IrMessage msg = make_gun_id_message(Irt::kUnassignedId);
   TEST_ASSERT(msg.valid == true);
   TEST_ASSERT(decode_gun_id(msg.data) == 0xF0F0);
 }
@@ -265,20 +265,20 @@ void test_unassigned_gun_id_message() {
 
 void test_ccm_id_extraction() {
   // Gun ID 0xC804 -> CCM ID = 0x04 = 4
-  TEST_ASSERT(IrtGun::get_ccm_id(0xC804) == 4);
+  TEST_ASSERT(Irt::get_ccm_id(0xC804) == 4);
 }
 
 void test_ccm_id_zero() {
-  TEST_ASSERT(IrtGun::get_ccm_id(0xFF00) == 0);
+  TEST_ASSERT(Irt::get_ccm_id(0xFF00) == 0);
 }
 
 void test_ccm_id_max() {
-  TEST_ASSERT(IrtGun::get_ccm_id(0x00FF) == 255);
+  TEST_ASSERT(Irt::get_ccm_id(0x00FF) == 255);
 }
 
 void test_ccm_id_unassigned() {
   // 0xF0F0 -> CCM = 0xF0 = 240
-  TEST_ASSERT(IrtGun::get_ccm_id(IrtGun::kUnassignedId) == 0xF0);
+  TEST_ASSERT(Irt::get_ccm_id(Irt::kUnassignedId) == 0xF0);
 }
 
 // ============================================================================
@@ -286,13 +286,13 @@ void test_ccm_id_unassigned() {
 // ============================================================================
 
 void test_is_unassigned_true() {
-  TEST_ASSERT(IrtGun::is_unassigned(0xF0F0) == true);
+  TEST_ASSERT(Irt::is_unassigned(0xF0F0) == true);
 }
 
 void test_is_unassigned_false() {
-  TEST_ASSERT(IrtGun::is_unassigned(0xC804) == false);
-  TEST_ASSERT(IrtGun::is_unassigned(0x0000) == false);
-  TEST_ASSERT(IrtGun::is_unassigned(0xFFFF) == false);
+  TEST_ASSERT(Irt::is_unassigned(0xC804) == false);
+  TEST_ASSERT(Irt::is_unassigned(0x0000) == false);
+  TEST_ASSERT(Irt::is_unassigned(0xFFFF) == false);
 }
 
 // ============================================================================
@@ -312,13 +312,71 @@ void test_known_gun_ids() {
       tests_failed++;
       return;
     }
-    if (IrtGun::get_ccm_id(decoded) != ccm) {
+    if (Irt::get_ccm_id(decoded) != ccm) {
       printf("FAIL: CCM extraction for 0x%04X: got %d expected %d\n", decoded,
-             IrtGun::get_ccm_id(decoded), ccm);
+             Irt::get_ccm_id(decoded), ccm);
       tests_failed++;
       return;
     }
   }
+}
+
+// ============================================================================
+// Role Classification Tests (Irt::classify — pure, host-testable)
+// ============================================================================
+
+void test_classify_no_candidate_holds() {
+  TEST_ASSERT(Irt::classify(false, 0x0000, 0x1234, 0, Irt::kPairWindowUs) ==
+              IrtPairResult::kHold);
+}
+
+void test_classify_matching_within_window_is_gun() {
+  // ~18ms gun-pair inter-arrival, matching id.
+  TEST_ASSERT(Irt::classify(true, 0x1234, 0x1234, 18000, Irt::kPairWindowUs) ==
+              IrtPairResult::kGun);
+}
+
+void test_classify_mismatch_within_window_is_replace() {
+  // Mismatch within window slides the candidate (old discarded, new held),
+  // so a following matching packet completes the pair. No drop-both.
+  TEST_ASSERT(Irt::classify(true, 0x1234, 0x5678, 18000, Irt::kPairWindowUs) ==
+              IrtPairResult::kReplace);
+}
+
+void test_classify_xyy_resolves_as_gun_y() {
+  // X Y Y: X held; Y mismatch within window -> replace (Y becomes candidate);
+  // second Y matches -> gun. Verify the two classification steps.
+  TEST_ASSERT(Irt::classify(true, 0x000A, 0x900A, 18000, Irt::kPairWindowUs) ==
+              IrtPairResult::kReplace);
+  TEST_ASSERT(Irt::classify(true, 0x900A, 0x900A, 18000, Irt::kPairWindowUs) ==
+              IrtPairResult::kGun);
+}
+
+void test_classify_beyond_window_is_spawner() {
+  // ~50ms spawner interval -> the held candidate is a lone spawner.
+  TEST_ASSERT(Irt::classify(true, 0x1234, 0x1234, 50000, Irt::kPairWindowUs) ==
+              IrtPairResult::kSpawner);
+}
+
+void test_classify_window_boundary_inclusive_is_gun() {
+  // delta == window counts as within the pair window.
+  TEST_ASSERT(Irt::classify(true, 0x1234, 0x1234, Irt::kPairWindowUs,
+                            Irt::kPairWindowUs) == IrtPairResult::kGun);
+}
+
+void test_classify_beyond_window_mismatch_still_spawner() {
+  // Beyond the window the candidate is emitted as a spawner regardless of the
+  // incoming id (which becomes the next candidate).
+  TEST_ASSERT(Irt::classify(true, 0x1234, 0x5678, 50000, Irt::kPairWindowUs) ==
+              IrtPairResult::kSpawner);
+}
+
+void test_irt_message_struct() {
+  IrtMessage m{0xC804, IrtRole::kGun};
+  TEST_ASSERT(m.id == 0xC804);
+  TEST_ASSERT(m.role == IrtRole::kGun);
+  m.role = IrtRole::kSpawner;
+  TEST_ASSERT(m.role == IrtRole::kSpawner);
 }
 
 }  // namespace
@@ -328,7 +386,7 @@ void test_known_gun_ids() {
 // ============================================================================
 
 void run_irt_gun_tests() {
-  printf("--- IRT Gun Tests ---\n");
+  printf("--- IRT Tests ---\n");
 
   // Protocol config.
   RUN_TEST(test_irt_config_is_valid);
@@ -379,6 +437,16 @@ void run_irt_gun_tests() {
 
   // Known gun IDs.
   RUN_TEST(test_known_gun_ids);
+
+  // Role classification (gun / spawner / invalid).
+  RUN_TEST(test_classify_no_candidate_holds);
+  RUN_TEST(test_classify_matching_within_window_is_gun);
+  RUN_TEST(test_classify_mismatch_within_window_is_replace);
+  RUN_TEST(test_classify_xyy_resolves_as_gun_y);
+  RUN_TEST(test_classify_beyond_window_is_spawner);
+  RUN_TEST(test_classify_window_boundary_inclusive_is_gun);
+  RUN_TEST(test_classify_beyond_window_mismatch_still_spawner);
+  RUN_TEST(test_irt_message_struct);
 
   printf("Passed: %d, Failed: %d\n\n", tests_passed, tests_failed);
 }

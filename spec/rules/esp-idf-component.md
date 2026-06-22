@@ -23,7 +23,7 @@ Codec and protocol layers live in one component (not two): protocol wrappers are
 | Namespace | Scope |
 |---|---|
 | `ir_lasertag::codec` | codec layer: `ProtocolConfig`, `HalfBit`, `IrMessage`, `RawTiming`, `IrEncoder`/`ir_encoder_create`, `IrTransmitter`, `IrReceiver`, `IrRxSource`, `RmtRxSource` |
-| `ir_lasertag::protocols` | protocol wrappers: `ArcliteTagCode`, `IrtGun`, `BcGun`, MilesTag constants |
+| `ir_lasertag::protocols` | protocol wrappers: `ArcliteTagCode`, `Irt`, `BcGun`, MilesTag constants |
 
 ### File Naming
 
