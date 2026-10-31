@@ -5,6 +5,8 @@
 
 #include "ir_lasertag/codec/ir_transmitter.hpp"
 
+#include <cstring>
+
 #include "ir_lasertag/codec/ir_encoder.hpp"
 
 #include "esp_check.h"
@@ -28,7 +30,16 @@ esp_err_t IrTransmitter::init(const rmt_tx_channel_config_t& config) {
     return ESP_ERR_INVALID_STATE;
   }
 
+  if (config.trans_queue_depth > kMaxQueueDepth) {
+    ESP_LOGE(TAG, "trans_queue_depth %u is over %u",
+             static_cast<unsigned>(config.trans_queue_depth),
+             static_cast<unsigned>(kMaxQueueDepth));
+    return ESP_ERR_INVALID_ARG;
+  }
   gpio_ = config.gpio_num;
+  queue_depth_ = config.trans_queue_depth > 0 ? config.trans_queue_depth : 1;
+  pending_ = 0;
+  next_slot_ = 0;
 
   // Create RMT TX channel
   esp_err_t ret = rmt_new_tx_channel(&config, &channel_);
@@ -99,7 +110,7 @@ void IrTransmitter::deinit() {
 
   initialized_ = false;
   protocol_set_ = false;
-  busy_ = false;
+  pending_ = 0;
   ESP_LOGI(TAG, "deinitialized");
 }
 
@@ -199,7 +210,14 @@ bool IRAM_ATTR IrTransmitter::rmt_tx_done_callback(
   (void)channel;
   (void)edata;
   auto* tx = static_cast<IrTransmitter*>(user_ctx);
-  tx->busy_ = false;
+  portENTER_CRITICAL_ISR(&tx->pending_mux_);
+  if (tx->pending_ > 0) {
+    tx->pending_ = tx->pending_ - 1;
+  }
+  portEXIT_CRITICAL_ISR(&tx->pending_mux_);
+  if (tx->done_callback_ != nullptr) {
+    tx->done_callback_(tx->done_ctx_);
+  }
   return false;
 }
 
@@ -220,35 +238,48 @@ esp_err_t IrTransmitter::send_async(const uint8_t* data, size_t bit_count,
     return ESP_ERR_INVALID_ARG;
   }
 
-  if (busy_) {
-    ESP_LOGW(TAG, "transmitter busy");
-    return ESP_ERR_INVALID_STATE;
-  }
-
   // Calculate bytes needed (round up)
   size_t byte_count = (bit_count + 7) / 8;
+  if (byte_count > IrMessage::kMaxDataBytes) {
+    ESP_LOGE(TAG, "%zu bits is over the %zu-byte limit", bit_count,
+             IrMessage::kMaxDataBytes);
+    return ESP_ERR_INVALID_ARG;
+  }
 
-  // Debug: log what we're transmitting
-  ESP_LOGI(TAG, "send_async: %zu bits, %zu bytes, repeat %d, data=[%02X %02X]",
-           bit_count, byte_count, loop_count,
-           byte_count > 0 ? data[0] : 0,
-           byte_count > 1 ? data[1] : 0);
+  // Claim a slot. Frames complete in order, so with fewer than
+  // queue_depth_ pending, the next slot's frame is done.
+  portENTER_CRITICAL(&pending_mux_);
+  if (pending_ >= queue_depth_) {
+    portEXIT_CRITICAL(&pending_mux_);
+    ESP_LOGD(TAG, "queue full (%zu)", queue_depth_);
+    return ESP_ERR_INVALID_STATE;
+  }
+  pending_ = pending_ + 1;
+  portEXIT_CRITICAL(&pending_mux_);
+  uint8_t* slot = slots_[next_slot_];
+  next_slot_ = (next_slot_ + 1) % queue_depth_;
+  memcpy(slot, data, byte_count);
 
-  // Reset encoder state
-  rmt_encoder_reset(encoder_);
+  ESP_LOGD(TAG, "send_async: %zu bits, %zu bytes, repeat %d, data=[%02X %02X]",
+           bit_count, byte_count, loop_count, slot[0],
+           byte_count > 1 ? slot[1] : 0);
 
+  // The driver resets the encoder when it starts each transaction, so a
+  // queued frame never disturbs one still being encoded.
   rmt_transmit_config_t tx_config = {
       .loop_count = loop_count,
       .flags = {
           .eot_level = 0,
-          .queue_nonblocking = 0,
+          .queue_nonblocking = 1,
       },
   };
 
-  busy_ = true;
-  esp_err_t ret = rmt_transmit(channel_, encoder_, data, byte_count, &tx_config);
+  esp_err_t ret = rmt_transmit(channel_, encoder_, slot, byte_count, &tx_config);
   if (ret != ESP_OK) {
-    busy_ = false;
+    portENTER_CRITICAL(&pending_mux_);
+    pending_ = pending_ - 1;
+    portEXIT_CRITICAL(&pending_mux_);
+    next_slot_ = (next_slot_ + queue_depth_ - 1) % queue_depth_;
     ESP_LOGE(TAG, "rmt_transmit failed: %s", esp_err_to_name(ret));
     return ret;
   }
@@ -311,17 +342,24 @@ esp_err_t IrTransmitter::send_raw(const RawTiming* timings, size_t count,
 
   esp_err_t ret = rmt_transmit(channel_, copy_encoder_, symbols,
                                count * sizeof(rmt_symbol_word_t), &tx_config);
-  free(symbols);
-
   if (ret != ESP_OK) {
+    free(symbols);
     ESP_LOGE(TAG, "raw transmit failed: %s", esp_err_to_name(ret));
     return ret;
   }
 
+  // The driver reads the symbols until the transaction is done (refills
+  // happen in its ISR), so they must outlive it.
   ret = rmt_tx_wait_all_done(channel_, timeout_ms);
   if (ret != ESP_OK) {
+    // Still in use: stop the channel before the buffer goes away.
     ESP_LOGE(TAG, "wait failed: %s", esp_err_to_name(ret));
+    rmt_disable(channel_);
+    free(symbols);
+    rmt_enable(channel_);
+    return ret;
   }
+  free(symbols);
 
   return ret;
 }

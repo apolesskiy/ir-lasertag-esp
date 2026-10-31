@@ -29,7 +29,7 @@ Transmit = consumer-facing TX capability of the library. A consumer describes a 
 | Blocking send | `send(data, bit_count, timeout_ms=1000, loop_count=0)` | Encode + transmit; block until done or timeout (`ESP_ERR_TIMEOUT`) |
 | Non-blocking send | `send_async(data, bit_count, loop_count=0)` | Start transmission, return immediately |
 | Await async | `wait_done(timeout_ms)` | Block until in-flight transmission completes or times out |
-| Poll | `is_busy()` | True while a transmission is in progress |
+| Poll | `is_busy()` | True while any frame is queued or in flight |
 | Raw send | `send_raw(timings, count, timeout_ms=1000)` | Emit an arbitrary `RawTiming` sequence verbatim; bypasses bit encoding |
 | Hardware repeat | `loop_count` arg on `send`/`send_async` | RMT repeats the packet N times in hardware (0 = single shot) |
 | Carrier duty | `set_carrier_duty(duty)` | Adjust carrier duty (0.0–1.0) without full protocol re-setup |
@@ -40,7 +40,7 @@ Transmit = consumer-facing TX capability of the library. A consumer describes a 
 - Encoded send: given a configured protocol and a packed bit buffer (MSB- or LSB-first per `bit_order`), the emitted IR carries header, the `bit_count` data bits each as two half-bits, and footer, modulated at `carrier_freq_hz`/`carrier_duty`.
 - Raw send: emitted mark/space timings equal the supplied `RawTiming` array exactly, in order; no header/footer/encoding applied.
 - Repeat: `loop_count = N` (N > 0) emits N back-to-back copies of the packet via RMT hardware loop.
-- Blocking vs async: `send` returns only after the signal is fully emitted (or timeout); `send_async` returns immediately and the consumer synchronizes via `is_busy`/`wait_done`.
+- Blocking vs async: `send` returns only after the signal is fully emitted (or timeout); `send_async` queues the frame (up to the channel's `trans_queue_depth`, refusing beyond it without blocking), returns immediately, and the consumer synchronizes via `is_busy`/`wait_done`.
 
 ### Acceptance
 

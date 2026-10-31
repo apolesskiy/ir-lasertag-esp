@@ -13,7 +13,9 @@
 #include <cstring>
 
 #include "esp_check.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "ir_isr_attr.hpp"
 
 static const char* TAG = "ir_encoder";
 
@@ -48,7 +50,7 @@ struct IrEncoderState {
  * This matches how the RMT hardware expects symbols (both duration0 and
  * duration1 should be non-zero for data symbols).
  */
-inline rmt_symbol_word_t build_bit_symbol(const HalfBit& half1,
+inline IR_LASERTAG_ISR_ATTR rmt_symbol_word_t build_bit_symbol(const HalfBit& half1,
                                          const HalfBit& half2) {
   rmt_symbol_word_t sym = {};
   sym.duration0 = half1.duration_us;
@@ -66,7 +68,7 @@ inline rmt_symbol_word_t build_bit_symbol(const HalfBit& half1,
  * @param msb_first True for MSB-first bit order.
  * @return Bit value (0 or 1).
  */
-inline int get_bit(const uint8_t* data, size_t byte_idx, size_t bit_idx,
+inline IR_LASERTAG_ISR_ATTR int get_bit(const uint8_t* data, size_t byte_idx, size_t bit_idx,
                    bool msb_first) {
   if (msb_first) {
     return (data[byte_idx] >> (7 - bit_idx)) & 1;
@@ -94,7 +96,7 @@ enum EncoderState {
  *   2: Encode footer
  *   3: Done
  */
-static size_t ir_encode(rmt_encoder_t* encoder, rmt_channel_handle_t channel,
+static IR_LASERTAG_ISR_ATTR size_t ir_encode(rmt_encoder_t* encoder, rmt_channel_handle_t channel,
                         const void* primary_data, size_t data_size,
                         rmt_encode_state_t* ret_state) {
   auto* ir_enc = reinterpret_cast<IrEncoderState*>(encoder);
@@ -216,7 +218,7 @@ static size_t ir_encode(rmt_encoder_t* encoder, rmt_channel_handle_t channel,
 /**
  * @brief Reset encoder state.
  */
-static esp_err_t ir_reset(rmt_encoder_t* encoder) {
+static IR_LASERTAG_ISR_ATTR esp_err_t ir_reset(rmt_encoder_t* encoder) {
   auto* ir_enc = reinterpret_cast<IrEncoderState*>(encoder);
   rmt_encoder_reset(ir_enc->copy_encoder);
   ir_enc->state = kStateHeader;
@@ -248,7 +250,9 @@ esp_err_t ir_encoder_create(const ProtocolConfig& config,
                       "invalid config");
 
   // Allocate encoder state
-  auto* ir_enc = static_cast<IrEncoderState*>(calloc(1, sizeof(IrEncoderState)));
+  auto* ir_enc = static_cast<IrEncoderState*>(
+      heap_caps_calloc(1, sizeof(IrEncoderState),
+                       MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
   ESP_RETURN_ON_FALSE(ir_enc != nullptr, ESP_ERR_NO_MEM, TAG,
                       "failed to allocate encoder");
 

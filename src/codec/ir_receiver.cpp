@@ -276,9 +276,40 @@ esp_err_t IrReceiver::receive_raw(RawTiming* timings, size_t max_count,
   return ESP_ERR_TIMEOUT;
 }
 
+esp_err_t IrReceiver::set_end_of_frame_us(uint16_t duration_us) {
+  if (!initialized_) {
+    return ESP_ERR_INVALID_STATE;
+  }
+  return source_->set_max_symbol_duration_us(duration_us);
+}
+
+esp_err_t IrReceiver::receive_symbols(rmt_symbol_word_t* symbols,
+                                      size_t max_count, size_t* count,
+                                      int64_t* last_edge_us,
+                                      uint32_t timeout_ms) {
+  if (!initialized_) {
+    return ESP_ERR_INVALID_STATE;
+  }
+  if (symbols == nullptr || count == nullptr) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  size_t num_symbols;
+  if (!xQueueReceive(symbol_queue_, &num_symbols, pdMS_TO_TICKS(timeout_ms))) {
+    return ESP_ERR_TIMEOUT;
+  }
+  *count = num_symbols < max_count ? num_symbols : max_count;
+  memcpy(symbols, symbol_buffer_, *count * sizeof(rmt_symbol_word_t));
+  if (last_edge_us != nullptr) {
+    *last_edge_us = last_edge_us_;
+  }
+  return ESP_OK;
+}
+
 void IRAM_ATTR IrReceiver::on_source_frame(const rmt_symbol_word_t* symbols,
-                                 size_t count, void* ctx) {
+                                           size_t count, int64_t last_edge_us,
+                                           void* ctx) {
   auto* self = static_cast<IrReceiver*>(ctx);
+  self->last_edge_us_ = last_edge_us;
 
   // Copy symbols to internal buffer (may be called from ISR context)
   size_t copy_count = (count < kSymbolBufferSize) ? count : kSymbolBufferSize;

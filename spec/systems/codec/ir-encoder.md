@@ -47,3 +47,11 @@ The encoder produces only the mark/space envelope. Carrier modulation (frequency
 ### State Machine
 
 `encode` advances a header → data → footer → done state machine, honoring RMT `RMT_ENCODING_MEM_FULL` back-pressure (returns partial progress to be resumed). `reset` returns to the header state and resets the copy encoder; `del` frees the copy encoder and the encoder state.
+
+### Bit Order
+
+The encoder walks the data buffer in memory order, byte by byte, and within each byte by `bit_order`. A multi-byte word therefore goes out MSB first only if its high byte is first in memory: a little-endian `uint16_t` passed as bytes would send its low byte first. Protocols build their byte buffers explicitly (Arclite: `arclite_word_bytes`). A host test runs the encoder on stubs and checks the symbols of known words.
+
+### Placement
+
+`encode` and `reset` run in the RMT TX ISR when a frame is queued behind another, so with `CONFIG_IR_LASERTAG_ISR_IRAM_SAFE` they (and their inline helpers) are placed in IRAM. The encoder state is allocated in internal RAM.

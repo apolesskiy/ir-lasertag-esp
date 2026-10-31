@@ -6,7 +6,9 @@
 #include "ir_lasertag/codec/rmt_rx_source.hpp"
 
 #include "esp_check.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "driver/rmt_rx.h"
 
 static const char* TAG = "rmt_rx_src";
@@ -30,8 +32,10 @@ esp_err_t RmtRxSource::init(const rmt_rx_channel_config_t& config,
   symbol_buffer_size_ = symbol_buffer_size;
 
   // Allocate symbol buffer
+  // The RX ISR copies into it, so it must be in internal RAM.
   symbol_buffer_ = static_cast<rmt_symbol_word_t*>(
-      malloc(symbol_buffer_size_ * sizeof(rmt_symbol_word_t)));
+      heap_caps_malloc(symbol_buffer_size_ * sizeof(rmt_symbol_word_t),
+                       MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
   if (symbol_buffer_ == nullptr) {
     ESP_LOGE(TAG, "failed to allocate symbol buffer");
     return ESP_ERR_NO_MEM;
@@ -149,13 +153,18 @@ bool IRAM_ATTR RmtRxSource::rmt_rx_done_cb(
     void* user_ctx) {
   auto* self = static_cast<RmtRxSource*>(user_ctx);
 
+  // The channel reports a frame once the line has been idle for
+  // signal_range_max, so the last edge was that long before now.
+  const int64_t last_edge_us = esp_timer_get_time() -
+      static_cast<int64_t>(self->max_symbol_duration_ns_ / 1000);
+
   // Deliver symbols to the registered callback, then restart.
   // The callback (IrReceiver::on_source_frame) copies the symbols
   // and queues them for task-context processing, so it's safe to
   // restart immediately here.
   if (self->frame_callback_) {
     self->frame_callback_(edata->received_symbols, edata->num_symbols,
-                          self->callback_ctx_);
+                          last_edge_us, self->callback_ctx_);
   }
 
   // Restart capture for next frame
@@ -163,7 +172,7 @@ bool IRAM_ATTR RmtRxSource::rmt_rx_done_cb(
   return false;  // No higher-priority task woken by default
 }
 
-void RmtRxSource::restart_receive() {
+void IRAM_ATTR RmtRxSource::restart_receive() {
   rmt_receive_config_t rx_config = {
       .signal_range_min_ns = 1000,
       .signal_range_max_ns = max_symbol_duration_ns_,

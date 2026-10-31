@@ -5,6 +5,8 @@
 
 #include "ir_lasertag/protocols/arclite/arclite.hpp"
 
+#include <iterator>
+
 #include "esp_log.h"
 
 static const char* TAG = "arclite_tagcode";
@@ -51,6 +53,14 @@ esp_err_t ArcliteTagCode::init(codec::IrTransmitter* transmitter,
                esp_err_to_name(err));
       return err;
     }
+    // The spec's end-of-frame threshold, not the codec's 1.5 x the longest
+    // pulse (which would give 1000 µs, at the limit).
+    err = receiver_->set_end_of_frame_us(kArcliteRxIdleUs);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "Failed to set the end-of-frame threshold: %s",
+               esp_err_to_name(err));
+      return err;
+    }
   }
 
   initialized_ = true;
@@ -74,14 +84,15 @@ esp_err_t ArcliteTagCode::send(uint16_t tag_code, uint32_t timeout_ms) {
     ESP_LOGE(TAG, "Transmitter not available");
     return ESP_ERR_INVALID_STATE;
   }
+  if (tag_code > kArcliteCodeMax) {
+    ESP_LOGE(TAG, "Tag code 0x%04X does not fit in 14 bits", tag_code);
+    return ESP_ERR_INVALID_ARG;
+  }
 
-  // Encode tag code as 2 bytes, MSB first
   uint8_t data[2];
-  data[0] = static_cast<uint8_t>(tag_code >> 8);
-  data[1] = static_cast<uint8_t>(tag_code & 0xFF);
-
+  arclite_word_bytes(tag_code, data);
   ESP_LOGD(TAG, "Sending tag code: 0x%04X", tag_code);
-  return transmitter_->send(data, 16, timeout_ms);
+  return transmitter_->send(data, kArcliteBitCount, timeout_ms);
 }
 
 esp_err_t ArcliteTagCode::send_async(uint16_t tag_code) {
@@ -89,13 +100,16 @@ esp_err_t ArcliteTagCode::send_async(uint16_t tag_code) {
     ESP_LOGE(TAG, "Transmitter not available");
     return ESP_ERR_INVALID_STATE;
   }
+  if (tag_code > kArcliteCodeMax) {
+    ESP_LOGE(TAG, "Tag code 0x%04X does not fit in 14 bits", tag_code);
+    return ESP_ERR_INVALID_ARG;
+  }
 
-  // Encode tag code into persistent buffer (MSB first)
-  send_data_[0] = static_cast<uint8_t>(tag_code >> 8);
-  send_data_[1] = static_cast<uint8_t>(tag_code & 0xFF);
-
+  // The transmitter copies the bytes into its own queue slot.
+  uint8_t data[2];
+  arclite_word_bytes(tag_code, data);
   ESP_LOGD(TAG, "Sending tag code async: 0x%04X", tag_code);
-  return transmitter_->send_async(send_data_, 16);
+  return transmitter_->send_async(data, kArcliteBitCount);
 }
 
 esp_err_t ArcliteTagCode::start_receive() {
@@ -133,55 +147,50 @@ bool ArcliteTagCode::try_receive(uint16_t* tag_code) {
   if (!receiving_ || receiver_ == nullptr || tag_code == nullptr) {
     return false;
   }
-
-  codec::IrMessage message;
-  if (receiver_->try_receive(&message) != ESP_OK) {
-    return false;
-  }
-
-  auto decoded = decode_message(message);
-  if (decoded.has_value()) {
-    *tag_code = decoded.value();
-    return true;
-  }
-  return false;
+  return receive_burst(tag_code, 0) == ESP_OK;
 }
 
 esp_err_t ArcliteTagCode::receive(uint16_t* tag_code, uint32_t timeout_ms) {
   if (!receiving_ || receiver_ == nullptr) {
     return ESP_ERR_INVALID_STATE;
   }
-
   if (tag_code == nullptr) {
     return ESP_ERR_INVALID_ARG;
   }
+  return receive_burst(tag_code, timeout_ms);
+}
 
-  codec::IrMessage message;
-  esp_err_t err = receiver_->receive(&message, timeout_ms);
+esp_err_t ArcliteTagCode::receive_burst(uint16_t* tag_code,
+                                        uint32_t timeout_ms) {
+  rmt_symbol_word_t symbols[codec::IrReceiver::kMaxFrameSymbols];
+  size_t count = 0;
+  esp_err_t err = receiver_->receive_symbols(symbols, std::size(symbols),
+                                             &count, nullptr, timeout_ms);
   if (err != ESP_OK) {
     return err;
   }
 
-  auto decoded = decode_message(message);
-  if (decoded.has_value()) {
-    *tag_code = decoded.value();
-    return ESP_OK;
+  // The first valid frame in the burst, if any.
+  struct Found {
+    bool ok = false;
+    uint16_t code = 0;
+  } found;
+  ArcliteDecoder decoder;
+  decoder.decode_symbols(
+      symbols, count,
+      [](const ArcliteFrame& frame, void* ctx) {
+        auto* f = static_cast<Found*>(ctx);
+        if (!f->ok && frame.result == ArcliteResult::kOk) {
+          f->ok = true;
+          f->code = frame.code;
+        }
+      },
+      &found);
+  if (!found.ok) {
+    return ESP_ERR_INVALID_RESPONSE;
   }
-
-  // Invalid message format, wait for next
-  return ESP_ERR_INVALID_RESPONSE;
-}
-
-std::optional<uint16_t> ArcliteTagCode::decode_message(
-    const codec::IrMessage& message) {
-  if (!message.valid || message.bit_count != 16) {
-    return std::nullopt;
-  }
-
-  // Decode 16-bit tag code from MSB-first data
-  uint16_t tag_code = (static_cast<uint16_t>(message.data[0]) << 8) |
-                       static_cast<uint16_t>(message.data[1]);
-  return tag_code;
+  *tag_code = found.code;
+  return ESP_OK;
 }
 
 codec::ProtocolConfig make_arclite_config() {

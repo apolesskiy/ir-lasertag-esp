@@ -32,6 +32,9 @@ namespace codec {
  */
 class IrReceiver {
  public:
+  /// Most symbols one frame can hold; receive_symbols() never returns more.
+  static constexpr size_t kMaxFrameSymbols = 64;
+
   IrReceiver();
   ~IrReceiver();
 
@@ -167,6 +170,38 @@ class IrReceiver {
                         size_t* received_count, uint32_t timeout_ms);
 
   /**
+   * @brief Receive one frame's symbols as the source delivered them.
+   *
+   * Blocks until a frame arrives or timeout. Works in either mode, for a
+   * protocol that decodes symbols itself (for example ArcliteDecoder).
+   *
+   * @param[out] symbols Output buffer.
+   * @param max_count Its size in symbols; a longer frame is truncated.
+   * @param[out] count Number of symbols copied.
+   * @param[out] last_edge_us `esp_timer` time of the frame's last edge
+   *             (nullable).
+   * @param timeout_ms Maximum time to wait (0 = no wait).
+   * @return ESP_OK, ESP_ERR_TIMEOUT, ESP_ERR_INVALID_ARG, or
+   *         ESP_ERR_INVALID_STATE if not initialized.
+   */
+  /**
+   * @brief Override the end-of-frame threshold set_protocol() computed.
+   *
+   * For a protocol whose rule isn't 1.5 x the longest pulse (Arclite's
+   * threshold is fixed by its spec). Call after set_protocol().
+   *
+   * @param duration_us The threshold, passed to the source's
+   *        set_max_symbol_duration_us().
+   * @return ESP_OK, ESP_ERR_INVALID_STATE if not initialized, or the
+   *         source's error.
+   */
+  esp_err_t set_end_of_frame_us(uint16_t duration_us);
+
+  esp_err_t receive_symbols(rmt_symbol_word_t* symbols, size_t max_count,
+                            size_t* count, int64_t* last_edge_us,
+                            uint32_t timeout_ms);
+
+  /**
    * @brief Compute max_symbol_duration_us from protocol timings.
    *
    * Returns 1.5x the longest individual pulse (mark or space) in the
@@ -186,7 +221,7 @@ class IrReceiver {
    * depending on the backend.
    */
   static void on_source_frame(const rmt_symbol_word_t* symbols,
-                              size_t count, void* ctx);
+                              size_t count, int64_t last_edge_us, void* ctx);
 
   /**
    * @brief Decode received symbols into message.
@@ -223,8 +258,9 @@ class IrReceiver {
   QueueHandle_t symbol_queue_ = nullptr;
 
   // Symbol buffer — frames are copied here by on_source_frame()
-  static constexpr size_t kSymbolBufferSize = 64;
+  static constexpr size_t kSymbolBufferSize = kMaxFrameSymbols;
   rmt_symbol_word_t symbol_buffer_[kSymbolBufferSize] = {};
+  int64_t last_edge_us_ = 0;  ///< Last edge of the frame in symbol_buffer_
 
   bool initialized_ = false;
   bool protocol_set_ = false;

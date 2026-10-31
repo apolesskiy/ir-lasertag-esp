@@ -16,7 +16,7 @@ protocol-specific APIs for laser tag systems.
 
 | Protocol | Encoding | Bits | Description |
 |----------|----------|------|-------------|
-| Arclite | Manchester | 16 | Tag Code collision detection |
+| Arclite | Manchester | 16 | Tag Code collision detection: 14-bit code + 2 parity bits |
 | IRT Gun | Pulse-width | 16 | Gun ID with paired transmission |
 | MilesTag | Pulse-distance | 14 | Player/team/damage standard |
 
@@ -97,6 +97,7 @@ ir_lasertag/
 │   │   └── ir_receiver.hpp    # IR receiver (decoded/raw modes)
 │   └── protocols/      # Protocol-specific message APIs
 │       ├── arclite/arclite.hpp  # Arclite TagCode wrapper
+│       ├── arclite/arclite_frame.hpp  # Arclite frame codec and receive decoder
 │       ├── irt/irt.hpp          # IRT Gun wrapper
 │       └── milestag/milestag.hpp # MilesTag constants
 └── src/
@@ -120,7 +121,8 @@ Protocol wrappers provide type-safe, protocol-correct APIs:
 
 - **IRT Gun**: Sends 16-bit packets in identical pairs with 2ms gap.
 - **MilesTag**: Structured field access for team/player/damage data.
-- **Arclite**: TagCode send/receive with Manchester encoding.
+- **Arclite**: TagCode send/receive with Manchester encoding, and a
+  pure frame codec and decoder that any `IrRxSource` can feed.
 
 ## API Reference
 
@@ -136,10 +138,11 @@ See header files for full parameter documentation:
 ### Protocols
 
 - [`arclite.hpp`](include/ir_lasertag/protocols/arclite/arclite.hpp) — `ArcliteTagCode` class
+- [`arclite_frame.hpp`](include/ir_lasertag/protocols/arclite/arclite_frame.hpp) — Arclite data word, frame encoder, `ArcliteDecoder`
 - [`irt.hpp`](include/ir_lasertag/protocols/irt/irt.hpp) — `Irt` class (gun + spawner)
 - [`milestag.hpp`](include/ir_lasertag/protocols/milestag/milestag.hpp) — `kMilestagConfig` constants
 
 ## Requirements
 
-- ESP-IDF v5.3.0 or later
+- ESP-IDF v5.3.0 or later (built with v6.1)
 - ESP32, ESP32-S2, ESP32-S3, or ESP32-C3 (any target with RMT peripheral)

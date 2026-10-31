@@ -17,8 +17,11 @@ add_executable(test_ir_protocol
   test_arclite_tagcode.cpp
   test_irt_gun.cpp
   test_main.cpp
-  # Source file under test (pure config logic, no hardware deps)
+  # Sources under test (no hardware deps; the encoder runs on stubs)
   ${CMAKE_CURRENT_SOURCE_DIR}/../src/codec/ir_protocol_config.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../src/codec/ir_encoder.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../src/protocols/arclite/arclite_frame.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/stubs/rmt_stub.cpp
 )
 
 add_test(NAME ir_protocol_tests COMMAND test_ir_protocol)

@@ -22,7 +22,7 @@
 
 ## Consistency
 [ ] CHK010 Carrier/encoder ownership is consistent with ir-encoder.md (encoder envelope vs transmitter carrier).
-[ ] CHK011 busy flag set/clear path (send start vs IRAM TX-done ISR) is internally consistent.
+[ ] CHK011 pending-count raise/lower path (send_async vs IRAM TX-done ISR), the queue depth and slot reuse are internally consistent.
 
 ## Style
 [ ] CHK012 No code blocks; tables for API enumeration; terse active present-tense voice.
