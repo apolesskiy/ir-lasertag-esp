@@ -119,7 +119,7 @@ static void tx_send_cycle(TxTaskCtx* ctx) {
                     static_cast<uint8_t>(seq & 0xFF)};
   transmitters[0].send_async(data, bit_count);
   transmitters[1].send_async(data, bit_count);
-  ctx->send_count++;
+  ctx->send_count = ctx->send_count + 1;
   transmitters[0].wait_done(100);
   transmitters[1].wait_done(100);
   // Record timestamp after TX completes — latency excludes the message
@@ -188,7 +188,7 @@ static void rx_poll_task(void* arg) {
       esp_err_t err = ctx->receiver->receive(&msg, 50);
       if (err == ESP_OK) {
         int64_t now = esp_timer_get_time();
-        ctx->msg_count++;
+        ctx->msg_count = ctx->msg_count + 1;
         // Decode sequence number and look up exact TX timestamp
         if (msg.bit_count >= 16) {
           uint16_t seq = (msg.data[0] << 8) | msg.data[1];
@@ -199,7 +199,7 @@ static void rx_poll_task(void* arg) {
           if (latency > ctx->latency_max_us) ctx->latency_max_us = latency;
         }
       } else {
-        ctx->timeout_count++;
+        ctx->timeout_count = ctx->timeout_count + 1;
       }
     }
   }
@@ -232,7 +232,7 @@ static void worker_task(void* arg) {
         acc += (i * 17 + 31);
         acc ^= (acc >> 5);
       }
-      ctx->iterations++;
+      ctx->iterations = ctx->iterations + 1;
     }
     (void)acc;
   }
@@ -441,6 +441,8 @@ extern "C" void app_main(void) {
       .resolution_hz = kRmtResolutionHz,
       .mem_block_symbols = 48,
       .trans_queue_depth = 4,
+      .intr_priority = 0,
+      .flags = {},
   };
   esp_err_t err = transmitters[0].init(tx_cfg0);
   if (err != ESP_OK) {
@@ -459,6 +461,8 @@ extern "C" void app_main(void) {
       .resolution_hz = kRmtResolutionHz,
       .mem_block_symbols = 48,
       .trans_queue_depth = 4,
+      .intr_priority = 0,
+      .flags = {},
   };
   err = transmitters[1].init(tx_cfg1);
   if (err != ESP_OK) {
@@ -498,6 +502,8 @@ extern "C" void app_main(void) {
         .clk_src = RMT_CLK_SRC_DEFAULT,
         .resolution_hz = kRmtResolutionHz,
         .mem_block_symbols = 48,
+        .intr_priority = 0,
+        .flags = {},
     };
 
     err = sources[i].init(rx_cfg);

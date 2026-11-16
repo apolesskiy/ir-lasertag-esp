@@ -40,7 +40,7 @@ src/codec/ir_receiver.cpp
 
 ### Frame Delivery Path
 
-The source invokes the receiver's frame callback (may run in ISR context). The callback copies up to `kSymbolBufferSize` (64) symbols into an internal buffer and queues the symbol count on a FreeRTOS queue (`xQueueSendFromISR`). Decoding runs later in task context inside `receive`/`receive_raw`, off the ISR.
+The source invokes the receiver's frame callback (may run in ISR context). The callback copies up to `kMaxFrameSymbols` (64, public; `kSymbolBufferSize` internally) symbols and the frame's `last_edge_us` into an internal buffer and queues the symbol count on a FreeRTOS queue (`xQueueSendFromISR`). Decoding runs later in task context inside `receive`/`receive_raw`/`receive_symbols`, off the ISR.
 
 ### Decoded Mode
 
@@ -59,6 +59,10 @@ Decoded mode requires a protocol set and raw mode disabled.
 - Manchester-optimized path (`decode_manchester`): splits each RMT symbol into two half-symbols and consumes durations in half-bit-sized increments. Adjacent same-level half-bits merge into double-length durations; only the needed portion is consumed and the remainder carries forward. The first half-bit's level decides the bit value (`one_first_level` vs `zero_first_level`). Handles a truncated trailing space on the last bit (RMT reports duration 0 at end-of-frame).
 
 Both paths apply `mark_bias_us` compensation and `tolerance_percent` when matching timings: bias is subtracted from received marks and added to received spaces, then the value must fall within `±tolerance` of the expected duration (`timing_matches`). Validity = `bit_count == protocol.bit_count` when `bit_count > 0`, else `bit_count > 0`.
+
+### Symbols
+
+`receive_symbols(symbols, max_count, count*, last_edge_us*, timeout_ms)` blocks up to the timeout for a frame and copies its symbols as the source delivered them (truncated to `max_count`), with the frame's `last_edge_us` (nullable out). It works in either mode and needs no protocol: it is for a protocol that decodes symbols itself, as Arclite does (spec/features/protocols/arclite.md). `ESP_ERR_TIMEOUT`, `ESP_ERR_INVALID_ARG` on null, `ESP_ERR_INVALID_STATE` if not initialized.
 
 ### Raw Mode
 

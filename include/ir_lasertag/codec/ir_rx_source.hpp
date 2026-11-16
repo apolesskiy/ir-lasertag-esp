@@ -24,12 +24,19 @@ namespace codec {
 /**
  * @brief Callback invoked when a complete frame of symbols is received.
  *
+ * May run in ISR context (RmtRxSource) or in a task (other backends): copy
+ * what you need and return quickly. The symbols are valid only during the
+ * call.
+ *
  * @param symbols Array of RMT symbols composing the frame.
  * @param count Number of symbols in the array.
+ * @param last_edge_us `esp_timer` time of the frame's last edge. The first
+ *        edge is this minus the sum of the symbols' durations.
  * @param ctx Opaque context pointer registered with the source.
  */
 using IrRxFrameCallback = void (*)(const rmt_symbol_word_t* symbols,
-                                   size_t count, void* ctx);
+                                   size_t count, int64_t last_edge_us,
+                                   void* ctx);
 
 /**
  * @brief Abstract interface for IR receive symbol sources.

@@ -41,10 +41,37 @@ class IrTransmitter {
   /**
    * @brief Initialize the transmitter.
    *
+   * `config.trans_queue_depth` is how many frames send_async() accepts at
+   * once: one in flight plus depth − 1 queued (0 counts as 1, at most
+   * kMaxQueueDepth). Use a resolution of 1 MHz: protocol timings are in µs.
+   *
    * @param config RMT TX channel configuration (esp-idf type).
-   * @return ESP_OK on success, error code otherwise.
+   * @return ESP_OK on success, ESP_ERR_INVALID_ARG if the queue depth is
+   *         over kMaxQueueDepth, or a driver error. On error nothing is
+   *         left allocated.
    */
   esp_err_t init(const rmt_tx_channel_config_t& config);
+
+  /// Most frames send_async() can hold at once (in flight plus queued).
+  static constexpr size_t kMaxQueueDepth = 4;
+
+  /// Called from the TX-done ISR after each frame (see set_done_callback).
+  using DoneCallback = void (*)(void* ctx);
+
+  /**
+   * @brief Register a callback for each completed frame.
+   *
+   * Runs in the RMT TX-done ISR, after the pending count is lowered: keep it
+   * short, ISR-safe, and in IRAM if CONFIG_IR_LASERTAG_ISR_IRAM_SAFE is set.
+   * Register it before sending; nullptr clears it.
+   *
+   * @param callback Function to call, or nullptr.
+   * @param ctx Passed to callback.
+   */
+  void set_done_callback(DoneCallback callback, void* ctx) {
+    done_ctx_ = ctx;
+    done_callback_ = callback;
+  }
 
   /**
    * @brief Deinitialize and release RMT resources.
@@ -63,7 +90,7 @@ class IrTransmitter {
    *
    * @return true if transmitting.
    */
-  bool is_busy() const { return busy_; }
+  bool is_busy() const { return pending_ != 0; }
 
   /**
    * @brief Set the protocol configuration.
@@ -95,13 +122,17 @@ class IrTransmitter {
   /**
    * @brief Transmit IR data asynchronously.
    *
-   * Starts transmission and returns immediately. Use is_busy() to
-   * poll for completion or wait_done() to block until complete.
+   * Queues the frame and returns immediately; it never blocks. The data
+   * is copied into an internal slot, so the caller's buffer need not
+   * outlive the call. Frames go out in order. Use is_busy() to poll for
+   * completion or wait_done() to block until all are sent.
    *
-   * @param data Data buffer to transmit.
+   * @param data Data buffer to transmit (at most IrMessage::kMaxDataBytes).
    * @param bit_count Number of bits to transmit.
    * @param loop_count RMT loop count (0 = single shot, N > 0 = N iterations).
-   * @return ESP_OK if transmission started, error code otherwise.
+   * @return ESP_OK if the frame was queued, ESP_ERR_INVALID_STATE if the
+   *         queue (init's depth) is full or the transmitter is not ready,
+   *         ESP_ERR_INVALID_ARG for bad data, or a driver error.
    */
   esp_err_t send_async(const uint8_t* data, size_t bit_count,
                        int loop_count = 0);
@@ -168,7 +199,13 @@ class IrTransmitter {
 
   bool initialized_ = false;
   bool protocol_set_ = false;
-  volatile bool busy_ = false;
+  DoneCallback done_callback_ = nullptr;
+  void* done_ctx_ = nullptr;
+  size_t queue_depth_ = 1;          ///< Frames accepted at once
+  volatile size_t pending_ = 0;     ///< Frames queued or in flight
+  size_t next_slot_ = 0;            ///< Slot for the next frame
+  uint8_t slots_[kMaxQueueDepth][IrMessage::kMaxDataBytes] = {};
+  portMUX_TYPE pending_mux_ = portMUX_INITIALIZER_UNLOCKED;
 };
 
 }  // namespace codec

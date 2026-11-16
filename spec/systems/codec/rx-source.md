@@ -24,12 +24,12 @@ src/codec/rmt_rx_source.cpp
 
 | Member | Contract |
 |---|---|
-| `set_on_frame_callback(IrRxFrameCallback cb, void* ctx)` | register the frame-complete callback; the backend must invoke `cb(symbols, count, ctx)` on every complete frame |
+| `set_on_frame_callback(IrRxFrameCallback cb, void* ctx)` | register the frame-complete callback; the backend must invoke `cb(symbols, count, last_edge_us, ctx)` on every complete frame |
 | `start()` | begin detecting IR edges and delivering frames |
 | `stop()` | stop delivering frames |
 | `set_max_symbol_duration_us(uint16_t)` | set the end-of-frame threshold (below) |
 
-`IrRxFrameCallback` = `void (*)(const rmt_symbol_word_t* symbols, size_t count, void* ctx)`. Virtual destructor; implementations own backend resources.
+`IrRxFrameCallback` = `void (*)(const rmt_symbol_word_t* symbols, size_t count, int64_t last_edge_us, void* ctx)`. `last_edge_us` is the `esp_timer` time of the frame's last edge, so a consumer can time the frame from its own symbols: its first edge is `last_edge_us` minus the sum of the symbols' durations. A backend that knows the edge's time passes it; one that only knows when it detected the end of the frame subtracts its end-of-frame threshold. Virtual destructor; implementations own backend resources.
 
 ### End-Of-Frame Threshold
 
@@ -57,4 +57,4 @@ Each `rmt_receive` is armed with a receive window:
 | `signal_range_min_ns` | fixed ~1000 ns | ESP32 RMT requirement; pulses shorter than this are treated as noise/glitch |
 | `signal_range_max_ns` | derived from `set_max_symbol_duration_us` (µs × 1000) | frame/packet separation = end-of-frame threshold |
 
-`start()` enables the channel then arms the first receive. The RX-done ISR (`IRAM`) forwards the captured frame to the registered callback, then immediately re-arms capture for the next frame. The callback is expected to copy/queue the symbols quickly (the receiver does so for task-context decode — see spec/systems/codec/ir-receiver.md), making immediate re-arm safe.
+`start()` enables the channel then arms the first receive. The RX-done ISR (`IRAM`) forwards the captured frame to the registered callback, with `last_edge_us` = `esp_timer_get_time()` minus the end-of-frame threshold (the channel reports a frame once the line has been idle that long; the error is the ISR latency), then immediately re-arms capture for the next frame (`restart_receive`, in IRAM). The symbol buffer is allocated in internal RAM, since the RX ISR copies into it. With `CONFIG_IR_LASERTAG_ISR_IRAM_SAFE` the option selects `RMT_RX_ISR_CACHE_SAFE` and `RMT_RECV_FUNC_IN_IRAM`; the registered callback then runs with the cache off too and must be in IRAM. The callback is expected to copy/queue the symbols quickly (the receiver does so for task-context decode — see spec/systems/codec/ir-receiver.md), making immediate re-arm safe.

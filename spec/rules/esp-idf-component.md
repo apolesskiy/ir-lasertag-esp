@@ -14,7 +14,7 @@ Artifacts:
 
 ### Component
 
-Single ESP-IDF component registered via `idf_component_register` in the root `CMakeLists.txt` (SRCS = codec sources + compiled protocol sources; `INCLUDE_DIRS = include`; `REQUIRES = log driver freertos esp_timer`). Public headers under `include/ir_lasertag/`, split into `codec/` and `protocols/<name>/`. Implementation under `src/` mirroring the include tree. C++17, ESP-IDF ≥ v5.3, any ESP32 variant with an RMT peripheral. License MIT.
+Single ESP-IDF component registered via `idf_component_register` in the root `CMakeLists.txt` (SRCS = codec sources + compiled protocol sources; `INCLUDE_DIRS = include`; `REQUIRES = log esp_driver_rmt esp_driver_gpio freertos esp_timer`; an optional `Kconfig` at the root). Public headers under `include/ir_lasertag/`, split into `codec/` and `protocols/<name>/`. Implementation under `src/` mirroring the include tree. C++17, ESP-IDF ≥ v5.3, any ESP32 variant with an RMT peripheral. License MIT.
 
 Codec and protocol layers live in one component (not two): protocol wrappers are thin and tightly coupled to codec types (`IrMessage`, `ProtocolConfig`); splitting adds overhead without reuse benefit.
 

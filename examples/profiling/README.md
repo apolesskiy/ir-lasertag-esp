@@ -34,7 +34,7 @@ Impact % = `(1 - loaded_iterations / baseline_iterations) × 100`.
 
 ### Target Module
 
-ESP32-S3-WROOM-1 (same hardware as software-ir-receiver-esp profiling example).
+ESP32-S3-WROOM-1.
 
 ### GPIO Allocation
 
@@ -64,8 +64,7 @@ ESP32-S3-WROOM-1 (same hardware as software-ir-receiver-esp profiling example).
                 └─── GPIO 39 (RX ch 3)
 ```
 
-Uses a subset of the software-ir-receiver-esp profiling wiring. Both
-examples can share the same hardware.
+The wiring is shown above.
 
 ### Build and Flash
 

@@ -1,0 +1,17 @@
+menu "IR laser tag (ir-lasertag-esp)"
+
+    config IR_LASERTAG_ISR_IRAM_SAFE
+        bool "Keep RMT IR transmit and receive running while flash is busy"
+        default n
+        select RMT_TX_ISR_CACHE_SAFE
+        select RMT_RX_ISR_CACHE_SAFE
+        select RMT_RECV_FUNC_IN_IRAM
+        help
+            Places the IR encoder (which runs in the RMT TX ISR when a frame
+            is queued behind another) and the RX restart path in IRAM, and
+            selects ESP-IDF's RMT cache-safe options, so that flash writes
+            (NVS, OTA) don't stall or stretch an IR frame. A frame callback
+            registered on RmtRxSource then runs while the cache is off too,
+            so it must be in IRAM as well.
+
+endmenu
